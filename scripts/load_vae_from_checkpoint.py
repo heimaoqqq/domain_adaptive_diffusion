@@ -35,7 +35,25 @@ def load_vae_model(checkpoint_path: str, device: str = 'cuda') -> nn.Module:
     # 检测运行环境
     is_kaggle = os.path.exists('/kaggle/working')
     
-    # 如果在Kaggle环境，优先使用无依赖的standalone VAE
+    # 检查是否是我们的Simple VAE checkpoint
+    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    model_type = checkpoint.get('model_type', None)
+    
+    if model_type == 'simple_vae_ddpm':
+        # 使用我们的Simple VAE
+        print("   检测到Simple VAE checkpoint")
+        vae_training_path = Path(__file__).parent.parent / 'vae_training'
+        sys.path.insert(0, str(vae_training_path))
+        from simple_vae import SimpleVAE
+        
+        vae = SimpleVAE.load(str(checkpoint_path), device)
+        print("   ✅ Simple VAE加载成功")
+        print(f"   Latent channels: {vae.latent_channels}")
+        print(f"   Downsample factor: 16")
+        print(f"   Scale factor: {vae.scale_factor}")
+        return vae
+        
+    # 如果在Kaggle环境，尝试其他VAE选项
     if is_kaggle:
         # 首先尝试使用minimal VAE（无外部依赖）
         minimal_path = Path(__file__).parent.parent / 'utils' / 'minimal_vae.py'
