@@ -148,12 +148,25 @@ class EpochBasedTrainer:
     
     def _init_vae(self):
         """初始化VAE用于可视化"""
-        vae_path = self.config.get('vae_path', '../../../simplified_vavae.py')
+        vae_checkpoint = self.config.get('vae', {}).get('checkpoint', '../vae/checkpoints/kl_vae_best.pt')
         
         try:
-            from scripts.prepare_data import load_vae_model
-            self.vae = load_vae_model(vae_path, self.device)
-            print("VAE loaded for visualization")
+            import sys
+            from pathlib import Path
+            vae_module_path = Path(__file__).parent.parent / 'vae'
+            sys.path.insert(0, str(vae_module_path))
+            from kl_vae import KL_VAE
+            
+            if Path(vae_checkpoint).exists():
+                checkpoint = torch.load(vae_checkpoint, map_location=self.device)
+                self.vae = KL_VAE()
+                self.vae.load_state_dict(checkpoint['model_state_dict'])
+                self.vae = self.vae.to(self.device)
+                self.vae.eval()
+                print(f"KL-VAE loaded for visualization: {vae_checkpoint}")
+            else:
+                self.vae = None
+                print("VAE checkpoint not found, skipping visualization")
         except Exception as e:
             print(f"Warning: Could not load VAE for visualization: {e}")
             self.vae = None

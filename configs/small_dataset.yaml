@@ -1,0 +1,91 @@
+# 小数据集优化配置 (4.6k images)
+
+# 模型配置 - 减小规模防止过拟合
+model:
+  type: "DomainConditionalUnet"
+  dim: 48  # 减小基础维度
+  dim_mults: [1, 2, 3, 4]  # 简化层级
+  channels: 4  # KL-VAE latent channels
+  num_classes: 31  # 用户数
+  num_domains: 2  # 源域和目标域
+  self_condition: false  # 关闭以减少参数
+  resnet_block_groups: 4  # 减少组数
+  learned_variance: false
+  dropout: 0.1  # 增加dropout防止过拟合
+  attention_resolutions: [8]  # 只在低分辨率使用注意力
+
+# 扩散配置
+diffusion:
+  timesteps: 1000
+  sampling_timesteps: 50  # DDIM快速采样
+  loss_type: "l2"
+  objective: "pred_noise"  # 最简单稳定
+  beta_schedule: "cosine"
+  ddim_sampling_eta: 0.0
+  auto_normalize: true
+  offset_noise_strength: 0.1  # 轻微噪声增强泛化
+  min_snr_loss_weight: true  # 稳定训练
+  min_snr_gamma: 5
+
+# 域适应配置
+domain_adaptation:
+  mmd_loss_weight: 0.3  # 增强域对齐
+  mmd_kernel_bandwidth: 1.0
+  domain_balance_ratio: 0.7  # 源域占比
+  use_ema: true
+  ema_decay: 0.995  # 更快的EMA更新
+
+# 训练配置 - 针对小数据集优化
+training:
+  # 阶段1: 预训练
+  pretrain:
+    epochs: 50  # 改为epoch制
+    batch_size: 16  # 减小batch防止过拟合
+    learning_rate: 1e-4
+    weight_decay: 0.01  # L2正则化
+    
+  # 阶段2: 域对齐
+  align:
+    epochs: 80
+    batch_size_source: 12
+    batch_size_target: 4  # 目标域样本少
+    learning_rate: 5e-5
+    weight_decay: 0.01
+    
+  # 阶段3: 目标域微调
+  finetune:
+    epochs: 30
+    batch_size: 8
+    learning_rate: 1e-5
+    weight_decay: 0.005
+
+  # 通用设置
+  num_workers: 0  # Windows兼容
+  amp: true  # 混合精度
+  gradient_clip: 1.0
+  save_best_only: true  # 只保存最佳模型
+  patience: 10  # 早停
+  
+# VAE配置
+vae:
+  checkpoint: "../vae/checkpoints/kl_vae_best.pt"
+  scale_factor: 0.18215  # KL-VAE标准值
+
+# 数据增强 - 针对小数据集
+augmentation:
+  random_flip: true
+  random_rotate: [-5, 5]  # 轻微旋转
+  random_scale: [0.95, 1.05]  # 轻微缩放
+  mixup_alpha: 0.2  # Mixup增强
+
+# 生成配置
+generation:
+  num_samples: 100  # 减少生成数量
+  batch_size: 10
+  guidance_scale: 2.0  # 适中的引导强度
+  
+# 日志
+logging:
+  use_wandb: false
+  use_tensorboard: true
+  log_every: 10  # 更频繁的日志

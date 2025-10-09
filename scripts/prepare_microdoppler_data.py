@@ -1,453 +1,256 @@
 """
-专门为微多普勒数据集设计的数据准备脚本
-处理organized_gait_dataset的特定结构
+简化版微多普勒数据准备脚本
+专门为小数据集和KL-VAE设计
 """
 
 import torch
-import argparse
-import sys
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+import numpy as np
+from PIL import Image
 from pathlib import Path
-import json
 from typing import Dict, List, Tuple
+import argparse
+from tqdm import tqdm
+import random
+import os
+import sys
 
 # 添加项目路径
-sys.path.append(str(Path(__file__).parent.parent.parent))
-
-from prepare_data import ImageDataset, load_vae_model, encode_dataset, compute_statistics, validate_latents
-from torch.utils.data import DataLoader
-import numpy as np
+sys.path.append(str(Path(__file__).parent.parent))
+from utils import set_seed
 
 
-def prepare_gait_datasets(
-    dataset_root: str,
-    source_gait: str,
-    target_gait: str,
-    users: List[int] = None,
-    train_ratio: float = 0.8
-) -> Tuple[Dict[str, Path], Dict[str, Path]]:
-    """
-    为步态数据集准备源域和目标域
-    
-    Args:
-        dataset_root: organized_gait_dataset路径
-        source_gait: 源域步态类型（如'Normal_line'）
-        target_gait: 目标域步态类型（如'Normal_free'）
-        users: 要包含的用户列表（None表示所有用户）
-        train_ratio: 训练集比例
-    
-    Returns:
-        source_paths: {train: Path, val: Path}
-        target_paths: {train: Path, val: Path}
-    """
-    dataset_root = Path(dataset_root)
-    source_dir = dataset_root / source_gait
-    target_dir = dataset_root / target_gait
-    
-    # 验证路径并提供详细信息
-    print(f"\n检查数据集路径:")
-    print(f"  源域路径: {source_dir}")
-    print(f"  存在: {source_dir.exists()}")
-    
-    if source_dir.exists():
-        # 列出目录内容
-        contents = list(source_dir.iterdir())
-        print(f"  目录内容（前10项）:")
-        for item in contents[:10]:
-            print(f"    - {item.name} ({'DIR' if item.is_dir() else 'FILE'})")
-    else:
-        raise ValueError(f"Source directory not found: {source_dir}")
-    
-    print(f"\n  目标域路径: {target_dir}")
-    print(f"  存在: {target_dir.exists()}")
-    
-    if target_dir.exists():
-        contents = list(target_dir.iterdir())
-        print(f"  目录内容（前10项）:")
-        for item in contents[:10]:
-            print(f"    - {item.name} ({'DIR' if item.is_dir() else 'FILE'})")
-    else:
-        raise ValueError(f"Target directory not found: {target_dir}")
-    
-    # 收集用户数据
-    source_users = {}
-    target_users = {}
-    
-    # 遍历源域 - 图像在子文件夹中
-    print("\n收集源域数据（仅.jpg文件）...")
-    for user_dir in source_dir.iterdir():
-        if user_dir.is_dir() and user_dir.name.startswith("ID_"):
-            # 从文件夹名提取用户ID，如 ID_1 -> 1
-            try:
-                user_id = int(user_dir.name.split("_")[1])
-                if 1 <= user_id <= 31:  # 验证范围
-                    if users is None or user_id in users:
-                        # 收集该用户文件夹中的所有图像（只收集jpg格式）
-                        user_images = list(user_dir.glob("*.jpg"))
-                        if user_images:
-                            source_users[user_id] = user_images
-                            print(f"  用户 ID_{user_id}: {len(user_images)} 张图像")
-            except Exception as e:
-                print(f"  警告: 无法处理文件夹 {user_dir.name}: {e}")
-    
-    print(f"\n源域共找到 {len(source_users)} 个用户，{sum(len(imgs) for imgs in source_users.values())} 张图像")
-    
-    # 遍历目标域 - 图像在子文件夹中
-    print("\n收集目标域数据（仅.jpg文件）...")
-    for user_dir in target_dir.iterdir():
-        if user_dir.is_dir() and user_dir.name.startswith("ID_"):
-            try:
-                user_id = int(user_dir.name.split("_")[1])
-                if 1 <= user_id <= 31:  # 验证范围
-                    if users is None or user_id in users:
-                        # 收集该用户文件夹中的所有图像（只收集jpg格式）
-                        user_images = list(user_dir.glob("*.jpg"))
-                        if user_images:
-                            target_users[user_id] = user_images
-                            print(f"  用户 ID_{user_id}: {len(user_images)} 张图像")
-            except Exception as e:
-                print(f"  警告: 无法处理文件夹 {user_dir.name}: {e}")
-    
-    print(f"\n目标域共找到 {len(target_users)} 个用户，{sum(len(imgs) for imgs in target_users.values())} 张图像")
-    
-    # Few-shot设置：源域使用所有数据，目标域只使用少量数据
-    SHOTS_PER_USER = 5  # Few-shot设置
-    SELECTION_STRATEGY = 'diversity'  # 使用diversity策略选择最具代表性的样本
-    
-    # 自动检测运行环境
-    import os
-    is_kaggle = os.path.exists('/kaggle/working')
-    
-    if is_kaggle:
-        # Kaggle环境路径
-        CLASSIFIER_PATH = '/kaggle/input/best-improved-classifier-pth/best_improved_classifier.pth'
-    else:
-        # 本地环境路径
-        CLASSIFIER_PATH = r'D:\Ysj\新建文件夹\VA-VAE\improved_classifier\best_improved_classifier.pth'
-    
-    print(f"\n🔬 域自适应扩散模型训练数据准备:")
-    print(f"  - 源域: 所有数据用于训练扩散模型")
-    print(f"  - 目标域: 每用户{SHOTS_PER_USER}张用于MMD域对齐")
-    print(f"  - 选择策略: {SELECTION_STRATEGY} (使用源域分类器)")
-    
-    # 加载分类器（只加载一次）
-    from diversity_selector import load_classifier
-    print(f"\n加载源域分类器用于diversity选择...")
-    classifier = load_classifier(CLASSIFIER_PATH, device='cuda')
-    
-    source_train = []
-    source_val = []
-    target_train = []
-    target_val = []
-    
-    for user_id in sorted(source_users.keys()):
-        # 源域：使用所有数据
-        user_images = sorted(source_users[user_id])
-        split_idx = int(len(user_images) * train_ratio)
-        source_train.extend(user_images[:split_idx])
-        source_val.extend(user_images[split_idx:])
+class MicroDopplerDataset(Dataset):
+    """微多普勒数据集"""
+    def __init__(self, image_paths: List[str], labels: List[int], transform=None):
+        self.image_paths = image_paths
+        self.labels = labels
+        self.transform = transform
         
-        # 目标域：Few-shot设置（每用户只用5张）
-        if user_id in target_users:
-            user_images = sorted(target_users[user_id])
-            
-            # 使用diversity策略选择few-shot样本
-            from diversity_selector import select_diverse_samples
-            
-            few_shot_images = select_diverse_samples(
-                user_images, 
-                SHOTS_PER_USER,
-                classifier=classifier,  # 使用已加载的分类器
-                device='cuda',
-                seed=42 + user_id
-            )
-            
-            # 这些数据用于计算MMD损失
-            target_train.extend(few_shot_images)
+    def __len__(self):
+        return len(self.image_paths)
+        
+    def __getitem__(self, idx):
+        # 加载图像
+        img = Image.open(self.image_paths[idx]).convert('RGB')
+        
+        # 转换为tensor并归一化到[-1, 1]
+        img = torch.from_numpy(np.array(img)).float().permute(2, 0, 1) / 255.0
+        img = 2.0 * img - 1.0
+        
+        return img, self.labels[idx]
+
+
+def collect_data(root_dir: Path, gait_type: str) -> Dict[str, List[Tuple[str, int]]]:
+    """收集数据并按用户ID组织"""
+    data_dir = root_dir / gait_type
+    if not data_dir.exists():
+        raise ValueError(f"数据目录不存在: {data_dir}")
     
-    print(f"\n数据划分统计:")
-    print(f"源域 - 训练: {len(source_train)}, 验证: {len(source_val)}")
-    print(f"目标域 - MMD对齐: {len(target_train)} ({len(target_train)//31 if len(target_train) > 0 else 0}张/用户)")
-    print(f"  说明：源域数据用于训练扩散模型主损失")
-    print(f"       目标域数据用于计算MMD损失实现域对齐")
+    user_data = {}
     
-    return {
-        'source_train': source_train,
-        'source_val': source_val,
-        'target_train': target_train,  # Few-shot样本
-        'target_val': []  # Few-shot设置下不需要目标域验证集
-    }
+    # 遍历用户目录
+    for user_dir in sorted(data_dir.iterdir()):
+        if not user_dir.is_dir() or not user_dir.name.startswith('ID_'):
+            continue
+            
+        user_id = int(user_dir.name.split('_')[1]) - 1  # 0-indexed
+        images = list(user_dir.glob('*.jpg'))
+        
+        if images:
+            user_data[user_id] = [(str(img), user_id) for img in images]
+            print(f"  用户 {user_dir.name}: {len(images)} 张图像")
+    
+    return user_data
+
+
+def split_data(user_data: Dict[str, List], train_ratio: float = 0.8) -> Tuple[List, List]:
+    """按用户划分训练/验证集"""
+    train_data = []
+    val_data = []
+    
+    for user_id, data in user_data.items():
+        # 打乱数据
+        random.shuffle(data)
+        
+        # 划分
+        n_train = int(len(data) * train_ratio)
+        train_data.extend(data[:n_train])
+        val_data.extend(data[n_train:])
+    
+    return train_data, val_data
+
+
+def select_fewshot_samples(user_data: Dict[str, List], n_shot: int = 5) -> List:
+    """为每个用户选择few-shot样本"""
+    fewshot_data = []
+    
+    for user_id, data in user_data.items():
+        # 随机选择n_shot个样本
+        selected = random.sample(data, min(n_shot, len(data)))
+        fewshot_data.extend(selected)
+        
+    return fewshot_data
+
+
+def load_kl_vae(checkpoint_path: Path, device: str) -> nn.Module:
+    """加载KL-VAE模型"""
+    # 添加VAE模块路径
+    vae_module_path = Path(__file__).parent.parent / 'vae'
+    sys.path.insert(0, str(vae_module_path))
+    from kl_vae import KL_VAE
+    
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"VAE checkpoint不存在: {checkpoint_path}")
+    
+    # 加载模型
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    vae = KL_VAE()
+    
+    if 'model_state_dict' in checkpoint:
+        vae.load_state_dict(checkpoint['model_state_dict'])
+    else:
+        vae.load_state_dict(checkpoint)
+    
+    vae = vae.to(device)
+    vae.eval()
+    
+    print(f"✅ 加载KL-VAE成功")
+    return vae
+
+
+def encode_data(vae: nn.Module, dataloader: DataLoader, device: str) -> Tuple[torch.Tensor, torch.Tensor]:
+    """使用VAE编码数据"""
+    all_latents = []
+    all_labels = []
+    
+    with torch.no_grad():
+        for images, labels in tqdm(dataloader, desc="编码中"):
+            images = images.to(device)
+            
+            # 编码
+            latents = vae.encode(images)
+            
+            # KL-VAE的scale_factor
+            scale_factor = getattr(vae, 'scale_factor', 0.18215)
+            latents = latents * scale_factor
+            
+            all_latents.append(latents.cpu())
+            all_labels.append(labels)
+    
+    return torch.cat(all_latents, dim=0), torch.cat(all_labels, dim=0)
 
 
 def main():
-    """主函数"""
-    parser = argparse.ArgumentParser(description='Prepare micro-Doppler data for domain adaptation')
+    parser = argparse.ArgumentParser(description='准备微多普勒数据')
     
-    # 自动检测运行环境
-    import os
-    is_kaggle = os.path.exists('/kaggle/working')
-    
-    # 如果在Kaggle环境，检查依赖并设置路径
-    if is_kaggle:
-        # 尝试安装缺失的依赖
-        try:
-            import subprocess
-            import sys
-            print("📦 安装VAE所需依赖...")
-            subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', 'omegaconf'])
-            print("✅ 依赖安装完成")
-        except:
-            print("⚠️ 无法安装依赖，将使用备用VAE加载器")
-            
-        vae_exists = False
-        # 检查您上传的位置
-        if os.path.exists('/kaggle/working/domain_adaptive_diffusion/utils/simplified_vavae.py'):
-            print("✅ 已找到simplified_vavae.py在utils目录")
-            default_vae_script = '/kaggle/working/domain_adaptive_diffusion/utils/simplified_vavae.py'
-            vae_exists = True
-        elif os.path.exists('/kaggle/working/simplified_vavae.py'):
-            print("✅ 已找到simplified_vavae.py在working目录")
-            default_vae_script = '/kaggle/working/simplified_vavae.py'
-            vae_exists = True
-        else:
-            print("\n⚠️ 注意：找不到simplified_vavae.py")
-            print("   请上传到以下位置之一：")
-            print("   - /kaggle/working/domain_adaptive_diffusion/utils/")
-            print("   - /kaggle/working/")
-            default_vae_script = '/kaggle/working/simplified_vavae.py'
-    
-    if is_kaggle:
-        # Kaggle环境路径
-        default_dataset_root = '/kaggle/input/organized-gait-dataset'
-        default_vae_checkpoint = '/kaggle/input/stage3/vavae-stage3-epoch26-val_rec_loss0.0000.ckpt'
-        # default_vae_script 已在上面设置
-    else:
-        # 本地环境路径
-        default_dataset_root = r'D:\Ysj\新建文件夹\VA-VAE\dataset\organized_gait_dataset\kaggle\working\organized_gait_dataset'
-        default_vae_checkpoint = r'D:\Ysj\新建文件夹\VA-VAE\VAE\vavae-stage3-epoch26-val_rec_loss0.0000.ckpt'
-        default_vae_script = r'D:\Ysj\新建文件夹\VA-VAE\simplified_vavae.py'
-    
-    # 数据集配置
-    parser.add_argument(
-        '--dataset_root',
-        type=str,
-        default=default_dataset_root,
-        help='Root path to organized_gait_dataset (will append gait type)'
-    )
-    parser.add_argument(
-        '--source_gait',
-        type=str,
-        default='Normal_line',
-        help='Source domain gait type'
-    )
-    parser.add_argument(
-        '--target_gait',
-        type=str,
-        default='Normal_free',
-        help='Target domain gait type'
-    )
-    parser.add_argument(
-        '--users',
-        type=int,
-        nargs='+',
-        default=None,
-        help='Specific users to include (default: all)'
-    )
+    # 数据配置
+    parser.add_argument('--dataset_root', type=str,
+                       default=r'D:\Ysj\新建文件夹\VA-VAE\dataset\organized_gait_dataset',
+                       help='数据集根目录')
+    parser.add_argument('--source_domain', type=str, default='Normal_line',
+                       help='源域步态类型')
+    parser.add_argument('--target_domain', type=str, default='Normal_free',
+                       help='目标域步态类型')
     
     # VAE配置
-    parser.add_argument(
-        '--vae_checkpoint',
-        type=str,
-        default=default_vae_checkpoint,
-        help='Path to VAE checkpoint'
-    )
-    parser.add_argument(
-        '--vae_script',
-        type=str,
-        default=default_vae_script,
-        help='Path to simplified_vavae.py script'
-    )
+    parser.add_argument('--vae_checkpoint', type=str,
+                       default='../vae/checkpoints/kl_vae_best.pt',
+                       help='KL-VAE checkpoint路径')
+    
+    # 训练配置
+    parser.add_argument('--train_ratio', type=float, default=0.8,
+                       help='训练集比例')
+    parser.add_argument('--n_shot', type=int, default=5,
+                       help='目标域每用户样本数')
+    parser.add_argument('--batch_size', type=int, default=16,
+                       help='批次大小')
+    parser.add_argument('--seed', type=int, default=42,
+                       help='随机种子')
     
     # 输出配置
-    parser.add_argument(
-        '--output_dir',
-        type=str,
-        default='../data/microdoppler_processed',
-        help='Directory to save processed latents'
-    )
-    
-    # 处理参数
-    parser.add_argument(
-        '--batch_size',
-        type=int,
-        default=32,
-        help='Batch size for encoding'
-    )
-    parser.add_argument(
-        '--train_ratio',
-        type=float,
-        default=0.8,
-        help='Training set ratio'
-    )
-    parser.add_argument(
-        '--device',
-        type=str,
-        default='cuda',
-        help='Device to use'
-    )
-    parser.add_argument(
-        '--seed',
-        type=int,
-        default=42,
-        help='Random seed'
-    )
+    parser.add_argument('--output_dir', type=str, default='../data/processed',
+                       help='输出目录')
     
     args = parser.parse_args()
     
-    # 设置种子
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
+    # 设置随机种子
+    set_seed(args.seed)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    print(f"\n准备数据集: {args.source_domain} -> {args.target_domain}")
+    
+    # 收集数据
+    dataset_root = Path(args.dataset_root)
+    source_data = collect_data(dataset_root, args.source_domain)
+    target_data = collect_data(dataset_root, args.target_domain)
+    
+    print(f"\n源域: {len(source_data)} 用户")
+    print(f"目标域: {len(target_data)} 用户")
+    
+    # 划分数据
+    source_train, source_val = split_data(source_data, args.train_ratio)
+    target_fewshot = select_fewshot_samples(target_data, args.n_shot)
+    
+    print(f"\n数据划分:")
+    print(f"源域 - 训练: {len(source_train)}, 验证: {len(source_val)}")
+    print(f"目标域 - Few-shot: {len(target_fewshot)} ({args.n_shot}张/用户)")
+    
+    # 加载VAE
+    print(f"\n加载VAE模型...")
+    vae = load_kl_vae(Path(args.vae_checkpoint), device)
     
     # 创建输出目录
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # 准备数据集路径
-    print(f"准备数据集: {args.source_gait} -> {args.target_gait}")
-    data_splits = prepare_gait_datasets(
-        args.dataset_root,
-        args.source_gait,
-        args.target_gait,
-        args.users,
-        args.train_ratio
-    )
-    
-    # 加载VAE
-    print("\n加载VAE模型...")
-    vae = load_vae_model(args.vae_script, args.device, checkpoint_path=args.vae_checkpoint)
-    
-    # 处理每个数据分割
-    all_statistics = {}
-    
-    for split_name, image_paths in data_splits.items():
-        if len(image_paths) == 0:
-            print(f"\n跳过空分割: {split_name}")
-            continue
-            
-        print(f"\n处理 {split_name}: {len(image_paths)} 张图像")
-        
-        # 创建临时数据集
-        class PathDataset(torch.utils.data.Dataset):
-            def __init__(self, paths, transform=None):
-                self.paths = paths
-                self.transform = transform
-                
-            def __len__(self):
-                return len(self.paths)
-                
-            def __getitem__(self, idx):
-                from PIL import Image
-                img_path = self.paths[idx]
-                image = Image.open(img_path).convert('RGB')
-                
-                # 调整大小
-                image = image.resize((256, 256), Image.LANCZOS)
-                
-                # 转换为tensor并归一化
-                image = np.array(image).astype(np.float32) / 255.0
-                image = torch.from_numpy(image).permute(2, 0, 1)
-                image = 2.0 * image - 1.0  # 归一化到[-1, 1]
-                
-                # 提取用户ID作为标签
-                filename = Path(img_path).stem
-                user_id = 0  # 默认值
-                
-                if 'ID_' in filename:
-                    try:
-                        user_id = int(filename.split('ID_')[1].split('_')[0]) - 1  # ID_1 -> 0 (0-indexed)
-                    except:
-                        pass
-                elif 'user_' in filename:
-                    try:
-                        user_id = int(filename.split('user_')[1].split('_')[0]) - 1  # 0-indexed
-                    except:
-                        pass
-                
-                return image, user_id
-        
-        dataset = PathDataset(image_paths)
-        dataloader = DataLoader(
-            dataset,
-            batch_size=args.batch_size,
-            shuffle=False,
-            num_workers=0,  # Windows下必须设为0避免序列化错误
-            pin_memory=True
-        )
-        
-        # 编码数据
-        latents, labels = encode_dataset(
-            dataloader, vae, args.device,
-            desc=f"编码 {split_name}"
-        )
-        
-        # 计算统计量
-        stats = compute_statistics(latents)
-        all_statistics[split_name] = stats
-        
-        # 验证质量
-        if not validate_latents(latents):
-            print(f"警告: {split_name} latents验证失败!")
-        
-        # 保存数据
-        torch.save(latents, output_dir / f'{split_name}_latents.pt')
-        torch.save(labels, output_dir / f'{split_name}_labels.pt')
-        torch.save(stats, output_dir / f'{split_name}_stats.pt')
-        print(f"保存 {split_name}: {latents.shape}")
-    
-    # 计算域偏移
-    if 'source_train' in all_statistics and 'target_train' in all_statistics:
-        print("\n域偏移分析:")
-        source_mean = all_statistics['source_train']['mean']
-        target_mean = all_statistics['target_train']['mean']
-        mean_diff = (source_mean - target_mean).abs().mean()
-        print(f"  均值差异: {mean_diff:.4f}")
-        
-        source_std = all_statistics['source_train']['std']
-        target_std = all_statistics['target_train']['std']
-        std_diff = (source_std - target_std).abs().mean()
-        print(f"  标准差差异: {std_diff:.4f}")
-    
-    # 保存元数据
-    metadata = {
-        'source_gait': args.source_gait,
-        'target_gait': args.target_gait,
-        'users': args.users or 'all',
-        'train_ratio': args.train_ratio,
-        'splits': {
-            split_name: len(paths) 
-            for split_name, paths in data_splits.items()
-        },
-        'image_size': 256,
-        'latent_shape': list(latents.shape[1:]) if 'latents' in locals() else None,
-        'vae_checkpoint': str(args.vae_checkpoint),
-        'timestamp': str(np.datetime64('now'))
+    # 编码数据
+    datasets = {
+        'source_train': source_train,
+        'source_val': source_val,
+        'target_fewshot': target_fewshot
     }
     
-    with open(output_dir / 'metadata.json', 'w') as f:
-        json.dump(metadata, f, indent=2)
+    for name, data in datasets.items():
+        if not data:
+            continue
+            
+        print(f"\n处理 {name}...")
+        
+        # 创建数据集和加载器
+        paths = [d[0] for d in data]
+        labels = [d[1] for d in data]
+        dataset = MicroDopplerDataset(paths, labels)
+        dataloader = DataLoader(dataset, batch_size=args.batch_size, 
+                              shuffle=False, num_workers=0)
+        
+        # 编码
+        latents, labels = encode_data(vae, dataloader, device)
+        
+        # 保存
+        torch.save({
+            'latents': latents,
+            'labels': labels,
+            'paths': paths
+        }, output_dir / f'{name}.pt')
+        
+        print(f"  保存: {name}.pt (形状: {latents.shape})")
     
-    # 创建简化的链接（用于训练脚本）
-    if (output_dir / 'source_train_latents.pt').exists():
-        # 创建标准命名的符号链接或复制
-        import shutil
-        shutil.copy(output_dir / 'source_train_latents.pt', output_dir / 'source_latents.pt')
-        shutil.copy(output_dir / 'source_train_labels.pt', output_dir / 'source_labels.pt')
-        shutil.copy(output_dir / 'target_train_latents.pt', output_dir / 'target_latents.pt')
-        shutil.copy(output_dir / 'target_train_labels.pt', output_dir / 'target_labels.pt')
+    # 保存数据统计
+    stats = {
+        'source_domain': args.source_domain,
+        'target_domain': args.target_domain,
+        'n_users': len(source_data),
+        'n_shot': args.n_shot,
+        'latent_shape': [4, 64, 64],  # KL-VAE输出
+        'scale_factor': getattr(vae, 'scale_factor', 0.18215)
+    }
     
-    print("\n" + "="*60)
-    print("数据准备完成!")
+    torch.save(stats, output_dir / 'data_stats.pt')
+    
+    print("\n✅ 数据准备完成!")
     print(f"输出目录: {output_dir}")
-    print("="*60)
 
 
 if __name__ == '__main__':

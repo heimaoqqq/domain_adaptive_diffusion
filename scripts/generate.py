@@ -316,7 +316,7 @@ def main():
     parser.add_argument(
         '--vae_path',
         type=str,
-        default='../../../simplified_vavae.py',
+        default='../vae/checkpoints/kl_vae_best.pt',
         help='Path to VAE model'
     )
     
