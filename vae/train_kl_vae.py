@@ -139,25 +139,61 @@ def validate(model: KL_VAE,
             
     n_batches = len(dataloader)
     
-    # Save reconstructions
+    # Save reconstructions with improved visualization
     if save_samples and first_batch is not None:
-        fig, axes = plt.subplots(2, 8, figsize=(16, 4))
-        for i in range(8):
-            # Original
-            axes[0, i].imshow(first_batch[i].permute(1, 2, 0).clamp(0, 1))
-            axes[0, i].axis('off')
+        fig = plt.figure(figsize=(20, 8))
+        
+        # 创建3行显示：原图、重建、差异
+        n_samples = min(8, first_batch.shape[0])
+        
+        for i in range(n_samples):
+            # 原图
+            ax1 = plt.subplot(3, n_samples, i + 1)
+            img_orig = first_batch[i].permute(1, 2, 0).clamp(0, 1)
+            ax1.imshow(img_orig)
+            ax1.axis('off')
             if i == 0:
-                axes[0, i].set_title('Original')
+                ax1.set_title('Original', fontsize=12)
                 
-            # Reconstruction
-            axes[1, i].imshow(first_recon[i].permute(1, 2, 0).clamp(0, 1))
-            axes[1, i].axis('off')
+            # 重建
+            ax2 = plt.subplot(3, n_samples, n_samples + i + 1)
+            img_recon = first_recon[i].permute(1, 2, 0).clamp(0, 1)
+            ax2.imshow(img_recon)
+            ax2.axis('off')
             if i == 0:
-                axes[1, i].set_title('Reconstruction')
+                ax2.set_title('Reconstruction', fontsize=12)
                 
+            # 差异图
+            ax3 = plt.subplot(3, n_samples, 2 * n_samples + i + 1)
+            diff = torch.abs(img_orig - img_recon)
+            # 放大差异以便观察
+            diff_vis = (diff * 5).clamp(0, 1)
+            ax3.imshow(diff_vis)
+            ax3.axis('off')
+            if i == 0:
+                ax3.set_title('Difference (5x)', fontsize=12)
+        
+        # 添加损失信息
+        fig.suptitle(f'Rec Loss: {total_rec_loss/n_batches:.4f}, KL Loss: {total_kl_loss/n_batches:.4f}', 
+                     fontsize=14)
+        
         plt.tight_layout()
-        plt.savefig(save_path)
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.close()
+        
+        # 保存损失曲线（如果有历史数据）
+        if hasattr(model, 'loss_history'):
+            plt.figure(figsize=(10, 6))
+            plt.plot(model.loss_history['train'], label='Train Loss')
+            plt.plot(model.loss_history['val'], label='Val Loss')
+            plt.xlabel('Epoch')
+            plt.ylabel('Loss')
+            plt.title('Training Progress')
+            plt.legend()
+            plt.grid(True)
+            loss_path = save_path.replace('.png', '_loss.png')
+            plt.savefig(loss_path, dpi=150, bbox_inches='tight')
+            plt.close()
     
     return {
         'loss': total_loss / n_batches,
@@ -222,11 +258,16 @@ def main():
     parser.add_argument('--lr', type=float, default=4.5e-6)  # SD's learning rate
     parser.add_argument('--kl_weight', type=float, default=1e-6)  # Very small KL weight
     parser.add_argument('--warmup_epochs', type=int, default=5)
+    parser.add_argument('--patience', type=int, default=20, help='Early stopping patience')
+    parser.add_argument('--min_delta', type=float, default=1e-4, 
+                       help='Minimum improvement for early stopping')
     
     # Checkpoints
     parser.add_argument('--checkpoint_dir', type=str, default='vae_checkpoints')
     parser.add_argument('--save_every', type=int, default=10)
     parser.add_argument('--val_split', type=float, default=0.1)
+    parser.add_argument('--visualize_every', type=int, default=5, 
+                       help='Generate visualization every N epochs')
     
     # Mode
     parser.add_argument('--analyze_only', action='store_true')
@@ -328,6 +369,17 @@ def main():
     
     # Training
     best_val_loss = float('inf')
+    train_losses_history = []
+    val_losses_history = []
+    patience_counter = 0
+    
+    # 为模型添加损失历史（用于可视化）
+    model.loss_history = {'train': [], 'val': []}
+    
+    print(f"\n训练配置:")
+    print(f"  - 可视化频率: 每{args.visualize_every}个epoch")
+    print(f"  - 早停patience: {args.patience}")
+    print(f"  - 最小改进阈值: {args.min_delta}")
     
     for epoch in range(start_epoch, args.epochs):
         print(f"\n=== Epoch {epoch+1}/{args.epochs} ===")
@@ -347,12 +399,16 @@ def main():
               f"KL: {train_losses['kl_loss']:.4f}")
         
         # Validate
-        save_samples = (epoch + 1) % args.save_every == 0
+        save_samples = (epoch + 1) % args.visualize_every == 0
         sample_path = os.path.join(args.checkpoint_dir, f'samples_epoch_{epoch+1}.png')
         
         val_losses = validate(model, val_loader, kl_weight, device,
                             save_samples=save_samples,
                             save_path=sample_path)
+        
+        # 更新损失历史
+        model.loss_history['train'].append(train_losses['loss'])
+        model.loss_history['val'].append(val_losses['loss'])
         
         print(f"Val - Loss: {val_losses['loss']:.4f}, "
               f"Rec: {val_losses['rec_loss']:.4f}, "
@@ -378,19 +434,57 @@ def main():
             torch.save(checkpoint, checkpoint_path)
             print(f"Saved checkpoint: {checkpoint_path}")
             
-        # Save best
+        # Save best model (delete old best)
         if val_losses['loss'] < best_val_loss:
             best_val_loss = val_losses['loss']
+            
+            # 删除旧的最佳模型
+            old_best_path = os.path.join(args.checkpoint_dir, 'kl_vae_best.pt')
+            if os.path.exists(old_best_path):
+                os.remove(old_best_path)
+                print(f"Removed old best model: {old_best_path}")
+            
+            # 保存新的最佳模型
             checkpoint['is_best'] = True
-            best_path = os.path.join(args.checkpoint_dir, 'best_kl_vae.pt')
+            checkpoint['best_val_loss'] = best_val_loss
+            best_path = os.path.join(args.checkpoint_dir, 'kl_vae_best.pt')
             torch.save(checkpoint, best_path)
-            print(f"Saved best model: {best_path}")
+            print(f"✅ Saved new best model (val_loss: {best_val_loss:.4f}): {best_path}")
+            
+            # 保存最佳模型的可视化
+            best_sample_path = os.path.join(args.checkpoint_dir, 'best_samples.png')
+            _ = validate(model, val_loader, kl_weight, device,
+                        save_samples=True,
+                        save_path=best_sample_path)
+            print(f"✅ Saved best model visualization: {best_sample_path}")
+            
+            # 重置patience计数器
+            patience_counter = 0
+        else:
+            # 没有改进，增加patience计数器
+            patience_counter += 1
+            if patience_counter >= args.patience:
+                print(f"\n⚠️ 早停: {args.patience}个epoch没有改进")
+                print(f"最佳验证损失: {best_val_loss:.4f}")
+                break
     
     # Final analysis
     print("\n=== Final latent analysis ===")
     analyze_latents(model, train_loader, device)
     
-    print("\n✅ Training complete!")
+    # 训练总结
+    print("\n" + "="*60)
+    print("训练总结")
+    print("="*60)
+    print(f"总训练轮数: {len(model.loss_history['train'])}")
+    print(f"最佳验证损失: {best_val_loss:.4f}")
+    print(f"最终训练损失: {model.loss_history['train'][-1]:.4f}")
+    print(f"最终验证损失: {model.loss_history['val'][-1]:.4f}")
+    print(f"\n最佳模型保存在: {args.checkpoint_dir}/kl_vae_best.pt")
+    print(f"可视化保存在: {args.checkpoint_dir}/best_samples.png")
+    print("="*60)
+    
+    print("\n✅ 训练完成!")
 
 
 if __name__ == '__main__':
