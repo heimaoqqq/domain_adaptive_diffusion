@@ -112,7 +112,17 @@ def prepare_gait_datasets(
     # Few-shot设置：源域使用所有数据，目标域只使用少量数据
     SHOTS_PER_USER = 5  # Few-shot设置
     SELECTION_STRATEGY = 'diversity'  # 使用diversity策略选择最具代表性的样本
-    CLASSIFIER_PATH = r'D:\Ysj\新建文件夹\VA-VAE\improved_classifier\best_improved_classifier.pth'
+    
+    # 自动检测运行环境
+    import os
+    is_kaggle = os.path.exists('/kaggle/working')
+    
+    if is_kaggle:
+        # Kaggle环境路径
+        CLASSIFIER_PATH = '/kaggle/input/best-improved-classifier-pth/best_improved_classifier.pth'
+    else:
+        # 本地环境路径
+        CLASSIFIER_PATH = r'D:\Ysj\新建文件夹\VA-VAE\improved_classifier\best_improved_classifier.pth'
     
     print(f"\n🔬 域自适应扩散模型训练数据准备:")
     print(f"  - 源域: 所有数据用于训练扩散模型")
@@ -172,11 +182,26 @@ def main():
     """主函数"""
     parser = argparse.ArgumentParser(description='Prepare micro-Doppler data for domain adaptation')
     
-    # 数据集配置 - 与run_universal_guidance.py保持一致
+    # 自动检测运行环境
+    import os
+    is_kaggle = os.path.exists('/kaggle/working')
+    
+    if is_kaggle:
+        # Kaggle环境路径
+        default_dataset_root = '/kaggle/input/organized-gait-dataset'
+        default_vae_checkpoint = '/kaggle/input/stage3/vavae-stage3-epoch26-val_rec_loss0.0000.ckpt'
+        default_vae_script = '/kaggle/working/simplified_vavae.py'  # 需要复制到working目录
+    else:
+        # 本地环境路径
+        default_dataset_root = r'D:\Ysj\新建文件夹\VA-VAE\dataset\organized_gait_dataset\kaggle\working\organized_gait_dataset'
+        default_vae_checkpoint = r'D:\Ysj\新建文件夹\VA-VAE\VAE\vavae-stage3-epoch26-val_rec_loss0.0000.ckpt'
+        default_vae_script = r'D:\Ysj\新建文件夹\VA-VAE\simplified_vavae.py'
+    
+    # 数据集配置
     parser.add_argument(
         '--dataset_root',
         type=str,
-        default=r'D:\Ysj\新建文件夹\VA-VAE\dataset\organized_gait_dataset\kaggle\working\organized_gait_dataset',
+        default=default_dataset_root,
         help='Root path to organized_gait_dataset (will append gait type)'
     )
     parser.add_argument(
@@ -203,13 +228,13 @@ def main():
     parser.add_argument(
         '--vae_checkpoint',
         type=str,
-        default=r'D:\Ysj\新建文件夹\VA-VAE\VAE\vavae-stage3-epoch26-val_rec_loss0.0000.ckpt',
+        default=default_vae_checkpoint,
         help='Path to VAE checkpoint'
     )
     parser.add_argument(
         '--vae_script',
         type=str,
-        default=r'D:\Ysj\新建文件夹\VA-VAE\simplified_vavae.py',
+        default=default_vae_script,
         help='Path to simplified_vavae.py script'
     )
     
