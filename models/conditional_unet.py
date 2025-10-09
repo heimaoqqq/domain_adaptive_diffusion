@@ -26,7 +26,7 @@ class DomainConditionalUnet(nn.Module):
         self,
         dim: int = 64,
         dim_mults: Tuple[int] = (1, 2, 4, 4),
-        channels: int = 32,  # VAE latent channels
+        channels: int = 4,  # VAE latent channels (KL-VAE standard)
         num_classes: int = 31,  # 31个用户
         num_domains: int = 2,   # 源域/目标域
         self_condition: bool = True,

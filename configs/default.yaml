@@ -5,7 +5,7 @@ model:
   type: "DomainConditionalUnet"
   dim: 64
   dim_mults: [1, 2, 4, 4]
-  channels: 32  # VAE latent channels
+  channels: 4  # VAE latent channels (KL-VAE uses 4)
   num_classes: 31  # Number of users
   num_domains: 2  # Source and target domains
   self_condition: true
@@ -74,7 +74,7 @@ data:
   target_latents: "target_latents.pt"
   source_labels: "source_labels.pt"
   target_labels: "target_labels.pt"
-  image_size: 16  # Latent size (256/16)
+  image_size: 64  # Latent size (256/4 for KL-VAE)
   normalize: true
 
 # Generation configuration

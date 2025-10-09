@@ -1,1 +1,0 @@
-# VAE training module

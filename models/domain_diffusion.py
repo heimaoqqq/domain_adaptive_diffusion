@@ -27,7 +27,7 @@ class DomainAdaptiveDiffusion(GaussianDiffusion):
         self,
         model,
         *,
-        image_size: int = 16,  # latent size (256/16)
+        image_size: int = 64,  # latent size (256/4 for KL-VAE)
         timesteps: int = 1000,
         sampling_timesteps: Optional[int] = None,
         loss_type: str = 'l2',
