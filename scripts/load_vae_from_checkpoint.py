@@ -32,7 +32,27 @@ def load_vae_model(checkpoint_path: str, device: str = 'cuda') -> nn.Module:
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"VAE checkpoint不存在: {checkpoint_path}")
     
-    # 添加LightningDiT路径
+    # 检测运行环境
+    is_kaggle = os.path.exists('/kaggle/working')
+    
+    # 如果在Kaggle环境，优先使用simplified_vavae.py
+    if is_kaggle and os.path.exists('/kaggle/working/simplified_vavae.py'):
+        print("   使用simplified_vavae.py (Kaggle环境)")
+        sys.path.insert(0, '/kaggle/working')
+        from simplified_vavae import SimplifiedVAVAE
+        
+        vae = SimplifiedVAVAE(checkpoint_path=str(checkpoint_path))
+        vae = vae.to(device)
+        vae.eval()
+        
+        print("   ✅ VA-VAE加载成功")
+        print(f"   Latent channels: 32")
+        print(f"   Downsample factor: 16")
+        scale_factor = getattr(vae, 'scale_factor', 1.0)
+        print(f"   Scale factor: {scale_factor}")
+        return vae
+    
+    # 添加LightningDiT路径（如果不在Kaggle或需要fallback）
     vavae_root = Path(__file__).parent.parent.parent  # 回到VA-VAE根目录
     lightningdit_path = vavae_root / "LightningDiT"
     if lightningdit_path.exists():
