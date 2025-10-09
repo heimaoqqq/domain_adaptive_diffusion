@@ -35,8 +35,26 @@ def load_vae_model(checkpoint_path: str, device: str = 'cuda') -> nn.Module:
     # 检测运行环境
     is_kaggle = os.path.exists('/kaggle/working')
     
-    # 如果在Kaggle环境，检查多个位置的simplified_vavae.py
+    # 如果在Kaggle环境，优先使用无依赖的standalone VAE
     if is_kaggle:
+        # 首先尝试使用minimal VAE（无外部依赖）
+        minimal_path = Path(__file__).parent.parent / 'utils' / 'minimal_vae.py'
+        if minimal_path.exists():
+            print("   使用minimal_vae.py (无外部依赖)")
+            sys.path.insert(0, str(minimal_path.parent))
+            from minimal_vae import MinimalVAE
+            
+            vae = MinimalVAE(checkpoint_path=str(checkpoint_path))
+            vae = vae.to(device)
+            vae.eval()
+            
+            print("   ✅ VA-VAE加载成功")
+            print(f"   Latent channels: {vae.z_channels}")
+            print(f"   Downsample factor: 16")
+            print(f"   Scale factor: {vae.scale_factor}")
+            return vae
+            
+        # 否则尝试simplified_vavae.py
         vae_paths = [
             '/kaggle/working/domain_adaptive_diffusion/utils/simplified_vavae.py',
             '/kaggle/working/simplified_vavae.py'
@@ -44,22 +62,26 @@ def load_vae_model(checkpoint_path: str, device: str = 'cuda') -> nn.Module:
         
         for vae_path in vae_paths:
             if os.path.exists(vae_path):
-                print(f"   使用simplified_vavae.py: {vae_path}")
-                sys.path.insert(0, os.path.dirname(vae_path))
-                from simplified_vavae import SimplifiedVAVAE
-                
-                vae = SimplifiedVAVAE(checkpoint_path=str(checkpoint_path))
-                vae = vae.to(device)
-                vae.eval()
-                
-                print("   ✅ VA-VAE加载成功")
-                print(f"   Latent channels: 32")
-                print(f"   Downsample factor: 16")
-                scale_factor = getattr(vae, 'scale_factor', 1.0)
-                print(f"   Scale factor: {scale_factor}")
-                return vae
-        else:
-            raise FileNotFoundError("找不到simplified_vavae.py，请检查文件位置")
+                print(f"   尝试使用simplified_vavae.py: {vae_path}")
+                try:
+                    sys.path.insert(0, os.path.dirname(vae_path))
+                    from simplified_vavae import SimplifiedVAVAE
+                    
+                    vae = SimplifiedVAVAE(checkpoint_path=str(checkpoint_path))
+                    vae = vae.to(device)
+                    vae.eval()
+                    
+                    print("   ✅ VA-VAE加载成功")
+                    print(f"   Latent channels: 32")
+                    print(f"   Downsample factor: 16")
+                    scale_factor = getattr(vae, 'scale_factor', 1.0)
+                    print(f"   Scale factor: {scale_factor}")
+                    return vae
+                except ImportError as e:
+                    print(f"   ⚠️ 无法导入simplified_vavae: {e}")
+                    continue
+        
+        raise FileNotFoundError("无法加载VAE，请检查文件位置和依赖")
     
     # 添加LightningDiT路径（如果不在Kaggle或需要fallback）
     vavae_root = Path(__file__).parent.parent.parent  # 回到VA-VAE根目录

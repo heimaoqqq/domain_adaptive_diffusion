@@ -186,8 +186,18 @@ def main():
     import os
     is_kaggle = os.path.exists('/kaggle/working')
     
-    # 如果在Kaggle环境，检查simplified_vavae.py是否存在
+    # 如果在Kaggle环境，检查依赖并设置路径
     if is_kaggle:
+        # 尝试安装缺失的依赖
+        try:
+            import subprocess
+            import sys
+            print("📦 安装VAE所需依赖...")
+            subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', 'omegaconf'])
+            print("✅ 依赖安装完成")
+        except:
+            print("⚠️ 无法安装依赖，将使用备用VAE加载器")
+            
         vae_exists = False
         # 检查您上传的位置
         if os.path.exists('/kaggle/working/domain_adaptive_diffusion/utils/simplified_vavae.py'):
