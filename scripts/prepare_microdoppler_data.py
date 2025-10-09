@@ -186,6 +186,27 @@ def main():
     import os
     is_kaggle = os.path.exists('/kaggle/working')
     
+    # 如果在Kaggle环境，尝试自动复制simplified_vavae.py
+    if is_kaggle:
+        import shutil
+        # 检查多个可能的位置
+        possible_vae_paths = [
+            '/kaggle/input/simplified-vavae/simplified_vavae.py',
+            '/kaggle/input/va-vae/simplified_vavae.py',
+            '/kaggle/input/vavae/simplified_vavae.py',
+        ]
+        
+        for src_path in possible_vae_paths:
+            if os.path.exists(src_path):
+                shutil.copy(src_path, '/kaggle/working/simplified_vavae.py')
+                print(f"✅ 已复制simplified_vavae.py从 {src_path}")
+                break
+        else:
+            # 如果都不存在，提示用户
+            if not os.path.exists('/kaggle/working/simplified_vavae.py'):
+                print("\n⚠️ 注意：simplified_vavae.py不存在于/kaggle/working/")
+                print("   请手动上传或创建包含此文件的Kaggle数据集")
+    
     if is_kaggle:
         # Kaggle环境路径
         default_dataset_root = '/kaggle/input/organized-gait-dataset'
