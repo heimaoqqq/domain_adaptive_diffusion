@@ -1,0 +1,112 @@
+# Default configuration for Domain Adaptive Diffusion Model
+
+# Model configuration
+model:
+  type: "DomainConditionalUnet"
+  dim: 64
+  dim_mults: [1, 2, 4, 4]
+  channels: 32  # VAE latent channels
+  num_classes: 31  # Number of users
+  num_domains: 2  # Source and target domains
+  self_condition: true
+  resnet_block_groups: 8
+  learned_variance: false
+  dropout: 0.0
+  attention_resolutions: [8, 4]  # Apply attention at these resolutions
+
+# Diffusion configuration
+diffusion:
+  timesteps: 1000
+  sampling_timesteps: 50  # For DDIM
+  loss_type: "l2"
+  objective: "pred_v"  # "pred_noise" | "pred_x0" | "pred_v"
+  beta_schedule: "cosine"
+  ddim_sampling_eta: 0.0
+  auto_normalize: true
+  offset_noise_strength: 0.0
+  min_snr_loss_weight: false
+  min_snr_gamma: 5
+
+# Domain adaptation configuration
+domain_adaptation:
+  mmd_loss_weight: 0.1
+  mmd_kernel_bandwidth: 1.0
+  domain_balance_ratio: 0.8  # Ratio of source domain in batch
+  use_ema: true
+  ema_decay: 0.999
+
+# Training configuration
+training:
+  # Phase 1: Pretrain
+  pretrain:
+    steps: 3000
+    batch_size: 32
+    learning_rate: 2e-4
+    gradient_accumulation: 1
+    
+  # Phase 2: Domain alignment
+  align:
+    steps: 4000
+    batch_size_source: 24
+    batch_size_target: 8
+    learning_rate: 1e-4
+    gradient_accumulation: 1
+    
+  # Phase 3: Target finetune
+  finetune:
+    steps: 3000
+    batch_size: 16
+    learning_rate: 5e-5
+    gradient_accumulation: 2
+
+  # General training settings
+  num_workers: 4
+  amp: true  # Automatic mixed precision
+  gradient_clip: 1.0
+  save_every: 1000
+  sample_every: 500
+  log_every: 50
+
+# Data configuration
+data:
+  latent_path: "data/processed"
+  source_latents: "source_latents.pt"
+  target_latents: "target_latents.pt"
+  source_labels: "source_labels.pt"
+  target_labels: "target_labels.pt"
+  image_size: 16  # Latent size (256/16)
+  normalize: true
+
+# Generation configuration
+generation:
+  num_samples: 1000
+  batch_size: 50
+  guidance_scale: 3.0
+  domain: "target"  # "source" | "target"
+  save_format: "pt"  # "pt" | "npz"
+
+# Evaluation configuration
+evaluation:
+  metrics:
+    - "fid"
+    - "mmd"
+    - "classification_accuracy"
+  classifier_path: "../domain_adaptation_experiment/checkpoints/best_classifier.pt"
+  num_samples: 1000
+
+# Paths
+paths:
+  checkpoint_dir: "checkpoints"
+  sample_dir: "outputs/samples"
+  log_dir: "outputs/logs"
+  eval_dir: "outputs/evaluation"
+
+# Logging
+logging:
+  use_wandb: false
+  wandb_project: "domain-adaptive-diffusion"
+  wandb_entity: null
+  use_tensorboard: true
+  log_samples: true
+  log_gradients: false
+
