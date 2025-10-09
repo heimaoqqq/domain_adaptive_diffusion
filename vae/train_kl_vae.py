@@ -139,61 +139,38 @@ def validate(model: KL_VAE,
             
     n_batches = len(dataloader)
     
-    # Save reconstructions with improved visualization
+    # Save reconstructions - simple comparison
     if save_samples and first_batch is not None:
-        fig = plt.figure(figsize=(20, 8))
+        fig = plt.figure(figsize=(16, 6))
         
-        # 创建3行显示：原图、重建、差异
+        # 只显示原图和重建图对比
         n_samples = min(8, first_batch.shape[0])
         
         for i in range(n_samples):
             # 原图
-            ax1 = plt.subplot(3, n_samples, i + 1)
+            ax1 = plt.subplot(2, n_samples, i + 1)
             img_orig = first_batch[i].permute(1, 2, 0).clamp(0, 1)
             ax1.imshow(img_orig)
             ax1.axis('off')
             if i == 0:
-                ax1.set_title('Original', fontsize=12)
+                ax1.set_title('Original', fontsize=14, fontweight='bold')
                 
-            # 重建
-            ax2 = plt.subplot(3, n_samples, n_samples + i + 1)
+            # 重建图
+            ax2 = plt.subplot(2, n_samples, n_samples + i + 1)
             img_recon = first_recon[i].permute(1, 2, 0).clamp(0, 1)
             ax2.imshow(img_recon)
             ax2.axis('off')
             if i == 0:
-                ax2.set_title('Reconstruction', fontsize=12)
-                
-            # 差异图
-            ax3 = plt.subplot(3, n_samples, 2 * n_samples + i + 1)
-            diff = torch.abs(img_orig - img_recon)
-            # 放大差异以便观察
-            diff_vis = (diff * 5).clamp(0, 1)
-            ax3.imshow(diff_vis)
-            ax3.axis('off')
-            if i == 0:
-                ax3.set_title('Difference (5x)', fontsize=12)
+                ax2.set_title('Reconstruction', fontsize=14, fontweight='bold')
         
-        # 添加损失信息
-        fig.suptitle(f'Rec Loss: {total_rec_loss/n_batches:.4f}, KL Loss: {total_kl_loss/n_batches:.4f}', 
-                     fontsize=14)
+        # 添加epoch和损失信息作为标题
+        epoch_num = save_path.split('epoch_')[1].split('.')[0] if 'epoch_' in save_path else 'best'
+        fig.suptitle(f'Epoch {epoch_num} - Rec Loss: {total_rec_loss/n_batches:.4f}', 
+                     fontsize=16, fontweight='bold')
         
         plt.tight_layout()
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.close()
-        
-        # 保存损失曲线（如果有历史数据）
-        if hasattr(model, 'loss_history'):
-            plt.figure(figsize=(10, 6))
-            plt.plot(model.loss_history['train'], label='Train Loss')
-            plt.plot(model.loss_history['val'], label='Val Loss')
-            plt.xlabel('Epoch')
-            plt.ylabel('Loss')
-            plt.title('Training Progress')
-            plt.legend()
-            plt.grid(True)
-            loss_path = save_path.replace('.png', '_loss.png')
-            plt.savefig(loss_path, dpi=150, bbox_inches='tight')
-            plt.close()
     
     return {
         'loss': total_loss / n_batches,
@@ -266,8 +243,6 @@ def main():
     parser.add_argument('--checkpoint_dir', type=str, default='vae_checkpoints')
     parser.add_argument('--save_every', type=int, default=10)
     parser.add_argument('--val_split', type=float, default=0.1)
-    parser.add_argument('--visualize_every', type=int, default=5, 
-                       help='Generate visualization every N epochs')
     
     # Mode
     parser.add_argument('--analyze_only', action='store_true')
@@ -369,15 +344,10 @@ def main():
     
     # Training
     best_val_loss = float('inf')
-    train_losses_history = []
-    val_losses_history = []
     patience_counter = 0
     
-    # 为模型添加损失历史（用于可视化）
-    model.loss_history = {'train': [], 'val': []}
-    
     print(f"\n训练配置:")
-    print(f"  - 可视化频率: 每{args.visualize_every}个epoch")
+    print(f"  - 每个epoch生成可视化对比图")
     print(f"  - 早停patience: {args.patience}")
     print(f"  - 最小改进阈值: {args.min_delta}")
     
@@ -398,17 +368,12 @@ def main():
               f"Rec: {train_losses['rec_loss']:.4f}, "
               f"KL: {train_losses['kl_loss']:.4f}")
         
-        # Validate
-        save_samples = (epoch + 1) % args.visualize_every == 0
+        # Validate - 每个epoch都生成可视化
         sample_path = os.path.join(args.checkpoint_dir, f'samples_epoch_{epoch+1}.png')
         
         val_losses = validate(model, val_loader, kl_weight, device,
-                            save_samples=save_samples,
+                            save_samples=True,  # 每个epoch都保存
                             save_path=sample_path)
-        
-        # 更新损失历史
-        model.loss_history['train'].append(train_losses['loss'])
-        model.loss_history['val'].append(val_losses['loss'])
         
         print(f"Val - Loss: {val_losses['loss']:.4f}, "
               f"Rec: {val_losses['rec_loss']:.4f}, "
@@ -476,12 +441,10 @@ def main():
     print("\n" + "="*60)
     print("训练总结")
     print("="*60)
-    print(f"总训练轮数: {len(model.loss_history['train'])}")
+    print(f"总训练轮数: {epoch + 1 - start_epoch}")
     print(f"最佳验证损失: {best_val_loss:.4f}")
-    print(f"最终训练损失: {model.loss_history['train'][-1]:.4f}")
-    print(f"最终验证损失: {model.loss_history['val'][-1]:.4f}")
     print(f"\n最佳模型保存在: {args.checkpoint_dir}/kl_vae_best.pt")
-    print(f"可视化保存在: {args.checkpoint_dir}/best_samples.png")
+    print(f"可视化对比图保存在: {args.checkpoint_dir}/")
     print("="*60)
     
     print("\n✅ 训练完成!")
