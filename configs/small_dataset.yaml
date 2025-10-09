@@ -71,12 +71,9 @@ vae:
   checkpoint: "../vae/checkpoints/kl_vae_best.pt"
   scale_factor: 0.18215  # KL-VAE标准值
 
-# 数据增强 - 针对小数据集
+# 数据增强 - 禁用（微多普勒数据不适合增强）
 augmentation:
-  random_flip: true
-  random_rotate: [-5, 5]  # 轻微旋转
-  random_scale: [0.95, 1.05]  # 轻微缩放
-  mixup_alpha: 0.2  # Mixup增强
+  enabled: false  # 微多普勒时频图不适合传统图像增强
 
 # 生成配置
 generation:

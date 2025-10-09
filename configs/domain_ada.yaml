@@ -61,9 +61,9 @@ training:
     batch_size: 32  # 专注目标域
     learning_rate: 2e-5  # 更小的学习率，防止过拟合
     warmup_epochs: 2
-    # Augmentation for target domain
-    use_augmentation: true
-    augmentation_prob: 0.3
+    # No augmentation for micro-Doppler data
+    use_augmentation: false
+    augmentation_prob: 0.0
 
   # Optimizer
   optimizer: "adamw"
@@ -96,20 +96,13 @@ training:
   patience: 10
   min_delta: 0.001
 
-# Data augmentation (for target domain)
+# Data augmentation - DISABLED for micro-Doppler
 augmentation:
-  # Latent space augmentation
-  noise_level: 0.05
-  interpolation: true
-  interpolation_alpha: 0.3
-  
-  # Mixup
-  use_mixup: true
-  mixup_alpha: 0.2
-  
-  # CutMix (in latent space)
-  use_cutmix: false
-  cutmix_alpha: 1.0
+  enabled: false  # 微多普勒时频图不适合数据增强
+  # 原因：
+  # 1. 时频图的物理意义不允许随意变换
+  # 2. 翻转/旋转会破坏多普勒频移信息
+  # 3. 混合会产生不真实的频谱
 
 # Generation - classifier-free guidance
 generation:
