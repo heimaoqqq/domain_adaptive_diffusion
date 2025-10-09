@@ -186,32 +186,30 @@ def main():
     import os
     is_kaggle = os.path.exists('/kaggle/working')
     
-    # 如果在Kaggle环境，尝试自动复制simplified_vavae.py
+    # 如果在Kaggle环境，检查simplified_vavae.py是否存在
     if is_kaggle:
-        import shutil
-        # 检查多个可能的位置
-        possible_vae_paths = [
-            '/kaggle/input/simplified-vavae/simplified_vavae.py',
-            '/kaggle/input/va-vae/simplified_vavae.py',
-            '/kaggle/input/vavae/simplified_vavae.py',
-        ]
-        
-        for src_path in possible_vae_paths:
-            if os.path.exists(src_path):
-                shutil.copy(src_path, '/kaggle/working/simplified_vavae.py')
-                print(f"✅ 已复制simplified_vavae.py从 {src_path}")
-                break
+        vae_exists = False
+        # 检查您上传的位置
+        if os.path.exists('/kaggle/working/domain_adaptive_diffusion/utils/simplified_vavae.py'):
+            print("✅ 已找到simplified_vavae.py在utils目录")
+            default_vae_script = '/kaggle/working/domain_adaptive_diffusion/utils/simplified_vavae.py'
+            vae_exists = True
+        elif os.path.exists('/kaggle/working/simplified_vavae.py'):
+            print("✅ 已找到simplified_vavae.py在working目录")
+            default_vae_script = '/kaggle/working/simplified_vavae.py'
+            vae_exists = True
         else:
-            # 如果都不存在，提示用户
-            if not os.path.exists('/kaggle/working/simplified_vavae.py'):
-                print("\n⚠️ 注意：simplified_vavae.py不存在于/kaggle/working/")
-                print("   请手动上传或创建包含此文件的Kaggle数据集")
+            print("\n⚠️ 注意：找不到simplified_vavae.py")
+            print("   请上传到以下位置之一：")
+            print("   - /kaggle/working/domain_adaptive_diffusion/utils/")
+            print("   - /kaggle/working/")
+            default_vae_script = '/kaggle/working/simplified_vavae.py'
     
     if is_kaggle:
         # Kaggle环境路径
         default_dataset_root = '/kaggle/input/organized-gait-dataset'
         default_vae_checkpoint = '/kaggle/input/stage3/vavae-stage3-epoch26-val_rec_loss0.0000.ckpt'
-        default_vae_script = '/kaggle/working/simplified_vavae.py'  # 需要复制到working目录
+        # default_vae_script 已在上面设置
     else:
         # 本地环境路径
         default_dataset_root = r'D:\Ysj\新建文件夹\VA-VAE\dataset\organized_gait_dataset\kaggle\working\organized_gait_dataset'
