@@ -12,8 +12,12 @@ from torchvision import transforms
 from PIL import Image
 import argparse
 import os
+import time
 from pathlib import Path
 from tqdm import tqdm
+import matplotlib
+# 在Kaggle环境使用Agg后端避免GUI问题
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from typing import Dict
 import numpy as np
@@ -116,6 +120,10 @@ def setup_ddp(rank, world_size):
     
     # Set device
     torch.cuda.set_device(rank)
+    
+    # 验证设置
+    if rank == 0:
+        print(f"DDP initialized: Rank {rank}/{world_size}, Device: cuda:{rank}")
 
 
 def cleanup_ddp():
@@ -144,7 +152,9 @@ def train_epoch(model: DDP,
                 kl_weight: float,
                 device: torch.device,
                 rank: int,
-                perceptual_loss_fn=None) -> Dict[str, float]:
+                perceptual_loss_fn=None,
+                gradient_accumulation_steps: int = 1,
+                epoch: int = 0) -> Dict[str, float]:
     """Train for one epoch with DDP"""
     model.train()
     
@@ -153,30 +163,42 @@ def train_epoch(model: DDP,
     total_kl_loss = 0
     total_perceptual_loss = 0
     
+    # 验证数据量
+    n_batches_local = len(dataloader)
+    if rank == 0 and epoch == 0:
+        print(f"  GPU {rank}: Processing {n_batches_local} batches")
+    
     # Only show progress bar on rank 0
     if rank == 0:
         progress_bar = tqdm(dataloader, desc='Training')
     else:
         progress_bar = dataloader
+    
+    optimizer.zero_grad()  # 移到循环外
         
-    for batch in progress_bar:
+    for i, batch in enumerate(progress_bar):
         batch = batch.to(device)
         
         # Compute loss
         losses = model.module.get_loss(batch, kl_weight=kl_weight, perceptual_loss_fn=perceptual_loss_fn)
         loss = losses['loss']
         
+        # Scale loss by gradient accumulation steps
+        loss = loss / gradient_accumulation_steps
+        
         # Backward
-        optimizer.zero_grad()
         loss.backward()
         
-        # Gradient clipping for stability
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        # Update weights every gradient_accumulation_steps
+        if (i + 1) % gradient_accumulation_steps == 0:
+            # Gradient clipping for stability
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            
+            optimizer.step()
+            optimizer.zero_grad()
         
-        optimizer.step()
-        
-        # Record losses
-        total_loss += loss.item()
+        # Record losses (记录原始loss，不是缩放后的)
+        total_loss += losses['loss'].item()
         total_rec_loss += losses['rec_loss'].item()
         total_kl_loss += losses['kl_loss'].item()
         if 'perceptual_loss' in losses:
@@ -185,12 +207,14 @@ def train_epoch(model: DDP,
         # Update progress bar (only on rank 0)
         if rank == 0 and hasattr(progress_bar, 'set_postfix'):
             postfix_dict = {
-                'loss': f"{loss.item():.4f}",
+                'loss': f"{losses['loss'].item():.4f}",  # 显示原始loss
                 'rec': f"{losses['rec_loss'].item():.4f}",
                 'kl': f"{losses['kl_loss'].item():.4f}"
             }
             if 'perceptual_loss' in losses and losses['perceptual_loss'].item() > 0:
                 postfix_dict['perc'] = f"{losses['perceptual_loss'].item():.4f}"
+            if gradient_accumulation_steps > 1:
+                postfix_dict['acc'] = f"{(i + 1) % gradient_accumulation_steps}/{gradient_accumulation_steps}"
             progress_bar.set_postfix(postfix_dict)
         
     n_batches = len(dataloader)
@@ -264,36 +288,46 @@ def validate(model: DDP,
     
     # Save reconstructions - only on rank 0
     if save_samples and first_batch is not None and rank == 0:
-        fig = plt.figure(figsize=(16, 6))
-        
-        # 只显示原图和重建图对比
-        n_samples = min(8, first_batch.shape[0])
-        
-        for i in range(n_samples):
-            # 原图
-            ax1 = plt.subplot(2, n_samples, i + 1)
-            img_orig = first_batch[i].permute(1, 2, 0).clamp(0, 1)
-            ax1.imshow(img_orig)
-            ax1.axis('off')
-            if i == 0:
-                ax1.set_title('Original', fontsize=14, fontweight='bold')
+        try:
+            # 确保路径存在
+            save_dir = os.path.dirname(save_path)
+            if save_dir and not os.path.exists(save_dir):
+                os.makedirs(save_dir, exist_ok=True)
                 
-            # 重建图
-            ax2 = plt.subplot(2, n_samples, n_samples + i + 1)
-            img_recon = first_recon[i].permute(1, 2, 0).clamp(0, 1)
-            ax2.imshow(img_recon)
-            ax2.axis('off')
-            if i == 0:
-                ax2.set_title('Reconstruction', fontsize=14, fontweight='bold')
-        
-        # 添加epoch和损失信息作为标题
-        epoch_num = save_path.split('epoch_')[1].split('.')[0] if 'epoch_' in save_path else 'best'
-        fig.suptitle(f'Epoch {epoch_num} - Rec Loss: {avg_losses["rec_loss"]:.4f}', 
-                     fontsize=16, fontweight='bold')
-        
-        plt.tight_layout()
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        plt.close()
+            fig = plt.figure(figsize=(16, 6))
+            
+            # 只显示原图和重建图对比
+            n_samples = min(8, first_batch.shape[0])
+            
+            for i in range(n_samples):
+                # 原图
+                ax1 = plt.subplot(2, n_samples, i + 1)
+                img_orig = first_batch[i].permute(1, 2, 0).clamp(0, 1)
+                ax1.imshow(img_orig)
+                ax1.axis('off')
+                if i == 0:
+                    ax1.set_title('Original', fontsize=14, fontweight='bold')
+                    
+                # 重建图
+                ax2 = plt.subplot(2, n_samples, n_samples + i + 1)
+                img_recon = first_recon[i].permute(1, 2, 0).clamp(0, 1)
+                ax2.imshow(img_recon)
+                ax2.axis('off')
+                if i == 0:
+                    ax2.set_title('Reconstruction', fontsize=14, fontweight='bold')
+            
+            # 添加epoch和损失信息作为标题
+            epoch_num = save_path.split('epoch_')[1].split('.')[0] if 'epoch_' in save_path else 'best'
+            fig.suptitle(f'Epoch {epoch_num} - Rec Loss: {avg_losses["rec_loss"]:.4f}', 
+                         fontsize=16, fontweight='bold')
+            
+            plt.tight_layout()
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            plt.close('all')  # 确保关闭所有图形
+            print(f"  Saved visualization: {save_path}")
+        except Exception as e:
+            print(f"  Warning: Failed to save visualization: {e}")
+            plt.close('all')  # 确保清理
     
     return avg_losses
 
@@ -309,9 +343,18 @@ def train_ddp(rank, world_size, args):
     if rank == 0:
         print(f"Using DDP with {world_size} GPUs")
     
+    # 检测Kaggle环境并设置正确路径
+    if os.path.exists('/kaggle'):
+        # 在Kaggle环境
+        if not args.checkpoint_dir.startswith('/kaggle'):
+            args.checkpoint_dir = f'/kaggle/working/{args.checkpoint_dir}'
+            if rank == 0:
+                print(f"Detected Kaggle environment, using: {args.checkpoint_dir}")
+    
     # Create directories (only on rank 0)
     if rank == 0:
         os.makedirs(args.checkpoint_dir, exist_ok=True)
+        print(f"Checkpoint directory: {args.checkpoint_dir}")
     
     # Data transforms
     transform = transforms.Compose([
@@ -335,9 +378,29 @@ def train_ddp(rank, world_size, args):
         print(f"\nDataset: {len(full_dataset)} images")
         print(f"Train: {n_train}, Val: {n_val}")
     
-    # Distributed samplers
-    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
-    val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False)
+    # Distributed samplers - 重要：每个GPU只处理数据的一部分
+    # DistributedSampler会自动将数据分成world_size份
+    # 每个GPU处理 n_samples/world_size 个样本
+    train_sampler = DistributedSampler(
+        train_dataset, 
+        num_replicas=world_size, 
+        rank=rank, 
+        shuffle=True,
+        seed=42  # 固定种子保证一致性
+    )
+    val_sampler = DistributedSampler(
+        val_dataset, 
+        num_replicas=world_size, 
+        rank=rank, 
+        shuffle=False
+    )
+    
+    # 验证数据分配
+    if rank == 0:
+        print(f"Data distribution check:")
+        print(f"  Total train samples: {len(train_dataset)}")
+        print(f"  Samples per GPU: {len(train_dataset) // world_size}")
+        print(f"  Train sampler length: {len(train_sampler)}")
     
     # Dataloaders with DistributedSampler
     # 注意：每个GPU的batch_size，总batch_size = batch_size * world_size
@@ -347,7 +410,8 @@ def train_ddp(rank, world_size, args):
         sampler=train_sampler,
         num_workers=args.num_workers,
         pin_memory=True,
-        drop_last=True  # Important for DDP
+        drop_last=True,  # Important for DDP
+        persistent_workers=True if args.num_workers > 0 else False  # 保持数据加载器活跃
     )
     
     val_loader = DataLoader(
@@ -356,7 +420,8 @@ def train_ddp(rank, world_size, args):
         sampler=val_sampler,
         num_workers=args.num_workers,
         pin_memory=True,
-        drop_last=False
+        drop_last=False,
+        persistent_workers=True if args.num_workers > 0 else False
     )
     
     # Model
@@ -381,17 +446,30 @@ def train_ddp(rank, world_size, args):
     # Wrap model in DDP
     model = DDP(model, device_ids=[rank])
     
+    # 尝试使用torch.compile加速（PyTorch 2.0+）
+    try:
+        if hasattr(torch, 'compile'):
+            model = torch.compile(model, mode='reduce-overhead')
+            if rank == 0:
+                print("  Using torch.compile optimization")
+    except Exception:
+        pass  # 如果不支持就跳过
+    
     if rank == 0:
-        print(f"\nModel configuration:")
-        print(f"  Latent channels: {args.embed_dim}")
-        print(f"  Channel multipliers: {args.ch_mult}")
-        print(f"  Downsampling: {2**len(args.ch_mult)}x")
-        print(f"  Scale factor: {args.scale_factor}")
-        print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,}")
-        print(f"  Total batch size: {args.batch_size * world_size}")
+        total_params = sum(p.numel() for p in model.parameters())
+        print(f"\nModel: KL-VAE")
+        print(f"  Parameters: {total_params:,}")
+        print(f"  Latent: {args.embed_dim}ch, {2**len(args.ch_mult)}x downsample")
     
     # Optimizer (adjust learning rate for larger effective batch size)
-    effective_lr = args.lr * np.sqrt(world_size)  # Scale learning rate
+    # 学习率缩放：根据有效batch size的比例
+    # 基准：batch_size=4 (单GPU), lr=4.5e-6
+    base_batch_size = 4  # 原始单GPU配置
+    current_batch_size = args.batch_size * world_size * args.gradient_accumulation_steps
+    lr_scale = np.sqrt(current_batch_size / base_batch_size)
+    effective_lr = args.lr * lr_scale
+    
+    
     optimizer = optim.Adam(model.parameters(), lr=effective_lr, betas=(0.5, 0.9))
     
     # Resume (only load on rank 0 then broadcast)
@@ -432,14 +510,16 @@ def train_ddp(rank, world_size, args):
     
     if rank == 0:
         print(f"\n训练配置:")
-        print(f"  - 每个epoch生成可视化对比图")
-        print(f"  - 早停patience: {args.patience}")
-        print(f"  - 最小改进阈值: {args.min_delta}")
-        print(f"  - DDP训练：{world_size} GPUs")
+        print(f"  Epochs: {args.epochs}")
+        print(f"  Batch size: {args.batch_size * world_size} (per GPU: {args.batch_size})")
+        print(f"  Learning rate: {effective_lr:.2e}")
+        print(f"  GPUs: {world_size}")
     
     for epoch in range(start_epoch, args.epochs):
         # Set epoch for distributed sampler (important!)
         train_sampler.set_epoch(epoch)
+        
+        epoch_start = time.time()
         
         if rank == 0:
             print(f"\n=== Epoch {epoch+1}/{args.epochs} ===")
@@ -464,7 +544,9 @@ def train_ddp(rank, world_size, args):
             print(f"感知损失: {epochs_until_perceptual} epoch后启用")
         
         # Train
-        train_losses = train_epoch(model, train_loader, optimizer, kl_weight, device, rank, current_perceptual_fn)
+        train_losses = train_epoch(model, train_loader, optimizer, kl_weight, device, rank, 
+                                  current_perceptual_fn, gradient_accumulation_steps=args.gradient_accumulation_steps,
+                                  epoch=epoch)
         
         if rank == 0:
             print(f"Train - Loss: {train_losses['loss']:.4f}, "
@@ -488,6 +570,10 @@ def train_ddp(rank, world_size, args):
             print(f"Val - Loss: {val_losses['loss']:.4f}, "
                   f"Rec: {val_losses['rec_loss']:.4f}, "
                   f"KL: {val_losses['kl_loss']:.4f}")
+            
+            # 显示epoch时间
+            epoch_time = time.time() - epoch_start
+            print(f"Epoch time: {epoch_time:.1f}s ({epoch_time/60:.1f}min)")
         
         # Save checkpoints (only on rank 0)
         if rank == 0:
@@ -546,14 +632,16 @@ def train_ddp(rank, world_size, args):
                     print(f"最佳验证损失: {best_val_loss:.4f}")
                     break
         
-        # Synchronize across processes
-        dist.barrier()
+        # 确保所有进程同步
+        if dist.is_initialized():
+            dist.barrier()
         
         # Check if we should stop (broadcast from rank 0)
-        should_stop = torch.tensor([patience_counter >= args.patience], device=device)
-        dist.broadcast(should_stop, src=0)
-        if should_stop[0]:
-            break
+        if dist.is_initialized():
+            should_stop = torch.tensor([patience_counter >= args.patience], device=device)
+            dist.broadcast(should_stop, src=0)
+            if should_stop[0]:
+                break
     
     # 训练总结 (only on rank 0)
     if rank == 0:
@@ -578,8 +666,12 @@ def main():
     
     # Data
     parser.add_argument('--data_dir', type=str, required=True)
-    parser.add_argument('--batch_size', type=int, default=9)  # Per GPU batch size
-    parser.add_argument('--num_workers', type=int, default=2)
+    parser.add_argument('--batch_size', type=int, default=12)  # Per GPU batch size for T4
+    parser.add_argument('--num_workers', type=int, default=4)  # 增加数据加载线程
+    
+    # 支持torchrun启动
+    parser.add_argument('--local_rank', type=int, default=-1, 
+                       help='Local rank for torchrun')
     
     # Model
     parser.add_argument('--embed_dim', type=int, default=4)  # SD standard
@@ -613,20 +705,38 @@ def main():
     # DDP
     parser.add_argument('--world_size', type=int, default=-1,
                        help='Number of GPUs to use (-1 for all available)')
+    parser.add_argument('--gradient_accumulation_steps', type=int, default=1,
+                       help='Number of gradient accumulation steps (simulate larger batch size)')
     
     args = parser.parse_args()
     
-    # Determine world size
-    if args.world_size == -1:
-        args.world_size = torch.cuda.device_count()
-    
-    if args.world_size > 1:
-        print(f"Starting DDP training with {args.world_size} GPUs...")
-        # Launch DDP training
-        mp.spawn(train_ddp, args=(args.world_size, args), nprocs=args.world_size, join=True)
+    # 检查是否由torchrun启动
+    if args.local_rank != -1:
+        # torchrun启动模式
+        print("Detected torchrun launch")
+        # torchrun会自动设置RANK, WORLD_SIZE等环境变量
+        rank = int(os.environ.get('RANK', 0))
+        world_size = int(os.environ.get('WORLD_SIZE', 1))
+        local_rank = int(os.environ.get('LOCAL_RANK', 0))
+        
+        print(f"Rank: {rank}, World Size: {world_size}, Local Rank: {local_rank}")
+        args.world_size = world_size
+        
+        # 直接调用train_ddp
+        train_ddp(rank, world_size, args)
     else:
-        print("Single GPU detected. Please use train_kl_vae.py for single GPU training.")
-        print("Or set --world_size to the number of GPUs you want to use.")
+        # 传统mp.spawn启动模式
+        # Determine world size
+        if args.world_size == -1:
+            args.world_size = torch.cuda.device_count()
+        
+        if args.world_size > 1:
+            print(f"Starting DDP training with {args.world_size} GPUs...")
+            # Launch DDP training
+            mp.spawn(train_ddp, args=(args.world_size, args), nprocs=args.world_size, join=True)
+        else:
+            print("Single GPU detected. Please use train_kl_vae.py for single GPU training.")
+            print("Or set --world_size to the number of GPUs you want to use.")
 
 
 if __name__ == '__main__':
