@@ -254,20 +254,22 @@ class EpochBasedTrainer:
             # 确保只可视化前num_show个样本
             latents = latents[:num_show]
             
-            # 反归一化：除以scale_factor
-            scale_factor = self.config.get('vae', {}).get('scale_factor', 0.18215)
-            latents = latents / scale_factor
-            
-            # VAE解码
-            if hasattr(self.vae, 'decode'):
-                images = self.vae.decode(latents)
+            # 使用VAE的decode_latents方法，它会自动处理scale_factor
+            if hasattr(self.vae, 'decode_latents'):
+                # KL_VAE的decode_latents方法会自动除以scale_factor
+                images = self.vae.decode_latents(latents)
             else:
-                # 如果没有decode方法，尝试decoder
-                images = self.vae.decoder(latents) if hasattr(self.vae, 'decoder') else latents
+                # 备用方案：手动处理scale_factor
+                scale_factor = self.config.get('vae', {}).get('scale_factor', 0.18215)
+                latents = latents / scale_factor
+                
+                if hasattr(self.vae, 'decode'):
+                    images = self.vae.decode(latents)
+                else:
+                    images = self.vae.decoder(latents) if hasattr(self.vae, 'decoder') else latents
             
-            # 归一化到[0, 1]
-            # 假设VAE输出在[-1, 1]范围内（这是标准做法）
-            images = (images + 1.0) / 2.0
+            # 确保图像在[0, 1]范围内
+            # 注意：VAE训练时输入是[0,1]，所以输出也应该是[0,1]
             images = torch.clamp(images, 0.0, 1.0)
             
             # 转换为numpy
