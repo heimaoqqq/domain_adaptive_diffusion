@@ -40,13 +40,14 @@ class DomainConditionalUnet(nn.Module):
         super().__init__()
         
         # 基础UNet (来自denoising-diffusion-pytorch)
-        # 注意：denoising-diffusion-pytorch的Unet不支持dropout参数
+        # 使用额外的通道来传递条件信息
+        self.cond_channels = 2  # 1 for class, 1 for domain
         self.base_unet = Unet(
             dim=dim,
             init_dim=None,
             out_dim=channels if not learned_variance else channels * 2,
             dim_mults=dim_mults,
-            channels=channels,
+            channels=channels + self.cond_channels,  # 增加条件通道
             self_condition=self_condition,
             resnet_block_groups=resnet_block_groups,
             learned_variance=learned_variance,
@@ -66,27 +67,9 @@ class DomainConditionalUnet(nn.Module):
         self.self_condition = self_condition
         self.channels = channels
         
-        # 时间嵌入维度（从base_unet获取）
-        time_dim = dim * 4
-        
-        # 域嵌入层 (标准做法)
-        self.domain_embedding = nn.Embedding(num_domains, dim)
-        
-        # 类别嵌入层
-        self.class_embedding = nn.Embedding(num_classes + 1, dim)  # +1 for null class (CFG)
-        
-        # 条件投影层 (参考GLIDE)
-        self.condition_mlp = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(dim * 2, time_dim),  # domain + class
-            nn.SiLU(),
-            nn.Linear(time_dim, time_dim)
-        )
-        
-        # 可选: Cross-attention for stronger conditioning
-        self.use_cross_attention = False
-        if self.use_cross_attention:
-            self.cross_attn = CrossAttention(dim, dim * 2)
+        # 保存类别和域的数量用于归一化
+        self.num_classes = num_classes
+        self.num_domains = num_domains
     
     def __getattr__(self, name):
         """代理到base_unet的属性访问，用于兼容GaussianDiffusion"""
@@ -107,7 +90,7 @@ class DomainConditionalUnet(nn.Module):
         x_self_cond: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
-        前向传播
+        前向传播 - 使用通道拼接方式传递条件
         
         Args:
             x: 输入latent [B, C, H, W]
@@ -119,151 +102,51 @@ class DomainConditionalUnet(nn.Module):
         Returns:
             预测的噪声或x0 [B, C, H, W]
         """
-        batch_size = x.shape[0]
+        batch_size, c, h, w = x.shape
+        device = x.device
         
-        # 准备条件嵌入
-        condition = None
+        # 创建条件通道
+        cond_channels = []
         
-        if domain_labels is not None or class_labels is not None:
-            # 初始化条件向量
-            cond_parts = []
-            
-            # 域嵌入
-            if domain_labels is not None:
-                domain_emb = self.domain_embedding(domain_labels)  # [B, dim]
-                cond_parts.append(domain_emb)
-            else:
-                # 默认源域
-                default_domain = torch.zeros(batch_size, dtype=torch.long, device=x.device)
-                domain_emb = self.domain_embedding(default_domain)
-                cond_parts.append(domain_emb)
-            
-            # 类别嵌入
-            if class_labels is not None:
-                class_emb = self.class_embedding(class_labels)  # [B, dim]
-                cond_parts.append(class_emb)
-            else:
-                # Null class for CFG
-                null_class = torch.full((batch_size,), self.class_embedding.num_embeddings - 1, 
-                                       dtype=torch.long, device=x.device)
-                class_emb = self.class_embedding(null_class)
-                cond_parts.append(class_emb)
-            
-            # 组合条件
-            condition = torch.cat(cond_parts, dim=-1)  # [B, dim*2]
-            condition = self.condition_mlp(condition)  # [B, time_dim]
+        # 类别条件通道
+        if class_labels is not None:
+            # 归一化到[-1, 1]
+            class_channel = (class_labels.float() / (self.num_classes + 1) - 0.5) * 2
+        else:
+            # 默认使用null class
+            class_channel = torch.ones(batch_size, device=device)  # 1 表示null
+        class_channel = class_channel.view(batch_size, 1, 1, 1).expand(batch_size, 1, h, w)
+        cond_channels.append(class_channel)
         
-        # 修改base_unet的forward调用
-        # 注入条件到时间嵌入中
-        return self.forward_with_condition(x, time, condition, x_self_cond)
+        # 域条件通道
+        if domain_labels is not None:
+            # 0 for source, 1 for target -> [-1, 1]
+            domain_channel = (domain_labels.float() * 2 - 1)
+        else:
+            # 默认源域
+            domain_channel = -torch.ones(batch_size, device=device)  # -1 表示源域
+        domain_channel = domain_channel.view(batch_size, 1, 1, 1).expand(batch_size, 1, h, w)
+        cond_channels.append(domain_channel)
+        
+        # 拼接条件到输入
+        x_with_cond = torch.cat([x] + cond_channels, dim=1)  # [B, C+2, H, W]
+        
+        # 处理self condition
+        if x_self_cond is not None:
+            # self condition也需要添加条件通道（使用相同的条件）
+            x_self_cond_full = torch.cat([x_self_cond] + cond_channels, dim=1)
+        else:
+            x_self_cond_full = None
+        
+        # 调用base_unet
+        # 注意：base_unet期望输入通道数是C+2
+        output = self.base_unet(x_with_cond, time, x_self_cond_full)
+        
+        # 只返回前C个通道（对应原始latent channels）
+        return output[:, :c]
     
-    def forward_with_condition(
-        self,
-        x: torch.Tensor,
-        time: torch.Tensor,
-        condition: Optional[torch.Tensor],
-        x_self_cond: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
-        """
-        带条件的前向传播
-        修复版：正确注入条件到时间嵌入
-        """
-        if condition is None:
-            # 无条件，直接调用base_unet
-            return self.base_unet(x, time, x_self_cond)
-        
-        # 保存原始的time_mlp
-        original_time_mlp = self.base_unet.time_mlp
-        
-        # 创建带条件的时间嵌入函数
-        def time_mlp_with_condition(t):
-            # 获取原始时间嵌入
-            t_emb = original_time_mlp(t)
-            # 添加条件
-            return t_emb + condition
-        
-        # 临时替换time_mlp
-        self.base_unet.time_mlp = time_mlp_with_condition
-        
-        try:
-            # 执行前向传播
-            output = self.base_unet(x, time, x_self_cond)
-        finally:
-            # 恢复原始time_mlp
-            self.base_unet.time_mlp = original_time_mlp
-        
-        return output
 
 
-class CrossAttention(nn.Module):
-    """
-    交叉注意力模块 - 用于更强的条件控制
-    参考Stable Diffusion的实现
-    """
-    def __init__(self, query_dim: int, context_dim: int, heads: int = 4, dim_head: int = 32):
-        super().__init__()
-        inner_dim = dim_head * heads
-        
-        self.scale = dim_head ** -0.5
-        self.heads = heads
-        
-        self.to_q = nn.Linear(query_dim, inner_dim, bias=False)
-        self.to_k = nn.Linear(context_dim, inner_dim, bias=False)
-        self.to_v = nn.Linear(context_dim, inner_dim, bias=False)
-        
-        self.to_out = nn.Sequential(
-            nn.Linear(inner_dim, query_dim),
-            nn.Dropout(0.1)
-        )
-    
-    def forward(self, x: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: [B, N, D_q] 查询
-            context: [B, M, D_c] 键值对
-        """
-        h = self.heads
-        
-        q = self.to_q(x)
-        k = self.to_k(context)
-        v = self.to_v(context)
-        
-        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h=h), (q, k, v))
-        
-        dots = torch.einsum('bhid,bhjd->bhij', q, k) * self.scale
-        attn = dots.softmax(dim=-1)
-        
-        out = torch.einsum('bhij,bhjd->bhid', attn, v)
-        out = rearrange(out, 'b h n d -> b n (h d)')
-        
-        return self.to_out(out)
-
-
-class AdaptiveGroupNorm(nn.Module):
-    """
-    自适应组归一化 - DDPM标准做法
-    根据条件动态调整归一化参数
-    """
-    def __init__(self, num_groups: int, num_channels: int, cond_channels: int):
-        super().__init__()
-        self.norm = nn.GroupNorm(num_groups, num_channels)
-        self.condition_projector = nn.Linear(cond_channels, num_channels * 2)
-    
-    def forward(self, x: torch.Tensor, condition: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: [B, C, H, W]
-            condition: [B, D]
-        """
-        # 归一化
-        x = self.norm(x)
-        
-        # 条件调制
-        scale, shift = self.condition_projector(condition).chunk(2, dim=1)
-        scale = scale.unsqueeze(-1).unsqueeze(-1)  # [B, C, 1, 1]
-        shift = shift.unsqueeze(-1).unsqueeze(-1)  # [B, C, 1, 1]
-        
-        return x * (1 + scale) + shift
 
 
 if __name__ == "__main__":
@@ -285,7 +168,8 @@ if __name__ == "__main__":
     
     # 测试前向传播
     batch_size = 4
-    x = torch.randn(batch_size, 32, 16, 16)  # [B, C, H, W]
+    channels = 32
+    x = torch.randn(batch_size, channels, 16, 16)  # [B, C, H, W]
     time = torch.randint(0, 1000, (batch_size,))  # [B]
     class_labels = torch.randint(0, 31, (batch_size,))  # [B]
     domain_labels = torch.randint(0, 2, (batch_size,))  # [B]
@@ -295,5 +179,25 @@ if __name__ == "__main__":
     
     print(f"Input shape: {x.shape}")
     print(f"Output shape: {output.shape}")
+    print(f"Base UNet expects channels: {channels + 2} (original {channels} + 2 condition channels)")
+    
+    # 测试条件是否影响输出
+    x_test = torch.randn(2, channels, 16, 16)
+    t_test = torch.full((2,), 500)
+    
+    with torch.no_grad():
+        # 不同类别
+        out1 = model(x_test, t_test, torch.zeros(2, dtype=torch.long))
+        out2 = model(x_test, t_test, torch.full((2,), 15, dtype=torch.long))
+        diff_class = (out1 - out2).abs().mean().item()
+        
+        # 不同域
+        out3 = model(x_test, t_test, domain_labels=torch.zeros(2, dtype=torch.long))
+        out4 = model(x_test, t_test, domain_labels=torch.ones(2, dtype=torch.long))
+        diff_domain = (out3 - out4).abs().mean().item()
+    
+    print(f"\n条件影响测试:")
+    print(f"不同类别的输出差异: {diff_class:.4f}")
+    print(f"不同域的输出差异: {diff_domain:.4f}")
     print("✅ Model test passed!")
 
