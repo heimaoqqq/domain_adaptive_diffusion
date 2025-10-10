@@ -19,6 +19,14 @@ import numpy as np
 
 from kl_vae import KL_VAE
 
+# Try to import perceptual loss (optional)
+try:
+    from perceptual_loss import CombinedPerceptualLoss
+    PERCEPTUAL_AVAILABLE = True
+except ImportError:
+    print("Warning: perceptual_loss module not found. Perceptual loss will be disabled.")
+    PERCEPTUAL_AVAILABLE = False
+
 
 class MicroDopplerDataset(Dataset):
     """Dataset for micro-Doppler spectrograms"""
@@ -28,12 +36,55 @@ class MicroDopplerDataset(Dataset):
         
         # Collect all images
         self.images = []
-        for user_dir in sorted(self.root_dir.iterdir()):
-            if user_dir.is_dir() and user_dir.name.startswith('ID_'):
-                for img_path in user_dir.glob('*.jpg'):
-                    self.images.append(img_path)
+        
+        print(f"Searching for images in: {self.root_dir}")
+        print(f"Directory exists: {self.root_dir.exists()}")
+        
+        # List all subdirectories for debugging
+        if self.root_dir.exists():
+            subdirs = list(self.root_dir.iterdir())
+            print(f"Found {len(subdirs)} items in root directory")
+            
+            # Check if this is a single gait type directory with ID_* folders
+            id_dirs = [d for d in subdirs if d.is_dir() and d.name.startswith('ID_')]
+            print(f"Found {len(id_dirs)} ID_* directories")
+            
+            if id_dirs:  # This is a gait type directory
+                for user_dir in sorted(id_dirs):
+                    # Collect all jpg files (case-insensitive)
+                    jpg_files = []
+                    seen_paths = set()
                     
-        print(f"Found {len(self.images)} images")
+                    for pattern in ['*.jpg', '*.JPG', '*.jpeg', '*.JPEG']:
+                        for img_path in user_dir.glob(pattern):
+                            # Normalize path to avoid duplicates on case-insensitive filesystems
+                            normalized_path = str(img_path).lower()
+                            if normalized_path not in seen_paths:
+                                jpg_files.append(img_path)
+                                seen_paths.add(normalized_path)
+                    
+                    print(f"  {user_dir.name}: {len(jpg_files)} images")
+                    self.images.extend(jpg_files)
+            else:
+                # Check if root contains gait type subdirectories
+                gait_dirs = [d for d in subdirs 
+                           if d.is_dir() and '_' in d.name and not d.name.startswith('.')]
+                print(f"Found {len(gait_dirs)} gait type directories")
+                
+                for gait_dir in sorted(gait_dirs):
+                    for user_dir in sorted(gait_dir.iterdir()):
+                        if user_dir.is_dir() and user_dir.name.startswith('ID_'):
+                            # Collect all jpg files (case-insensitive)
+                            seen_paths = set()
+                            for pattern in ['*.jpg', '*.JPG', '*.jpeg', '*.JPEG']:
+                                for img_path in user_dir.glob(pattern):
+                                    # Normalize path to avoid duplicates on case-insensitive filesystems
+                                    normalized_path = str(img_path).lower()
+                                    if normalized_path not in seen_paths:
+                                        self.images.append(img_path)
+                                        seen_paths.add(normalized_path)
+                    
+        print(f"Total images found: {len(self.images)}")
         
     def __len__(self):
         return len(self.images)
@@ -52,20 +103,22 @@ def train_epoch(model: KL_VAE,
                 dataloader: DataLoader, 
                 optimizer: torch.optim.Optimizer,
                 kl_weight: float,
-                device: str) -> Dict[str, float]:
+                device: str,
+                perceptual_loss_fn=None) -> Dict[str, float]:
     """Train for one epoch"""
     model.train()
     
     total_loss = 0
     total_rec_loss = 0
     total_kl_loss = 0
+    total_perceptual_loss = 0
     
     progress_bar = tqdm(dataloader, desc='Training')
     for batch in progress_bar:
         batch = batch.to(device)
         
         # Compute loss
-        losses = model.get_loss(batch, kl_weight=kl_weight)
+        losses = model.get_loss(batch, kl_weight=kl_weight, perceptual_loss_fn=perceptual_loss_fn)
         loss = losses['loss']
         
         # Backward
@@ -81,19 +134,25 @@ def train_epoch(model: KL_VAE,
         total_loss += loss.item()
         total_rec_loss += losses['rec_loss'].item()
         total_kl_loss += losses['kl_loss'].item()
+        if 'perceptual_loss' in losses:
+            total_perceptual_loss += losses['perceptual_loss'].item()
         
         # Update progress bar
-        progress_bar.set_postfix({
+        postfix_dict = {
             'loss': f"{loss.item():.4f}",
             'rec': f"{losses['rec_loss'].item():.4f}",
             'kl': f"{losses['kl_loss'].item():.4f}"
-        })
+        }
+        if 'perceptual_loss' in losses and losses['perceptual_loss'].item() > 0:
+            postfix_dict['perc'] = f"{losses['perceptual_loss'].item():.4f}"
+        progress_bar.set_postfix(postfix_dict)
         
     n_batches = len(dataloader)
     return {
         'loss': total_loss / n_batches,
         'rec_loss': total_rec_loss / n_batches,
-        'kl_loss': total_kl_loss / n_batches
+        'kl_loss': total_kl_loss / n_batches,
+        'perceptual_loss': total_perceptual_loss / n_batches if perceptual_loss_fn else 0.0
     }
 
 
@@ -221,7 +280,7 @@ def main():
     
     # Data
     parser.add_argument('--data_dir', type=str, required=True)
-    parser.add_argument('--batch_size', type=int, default=8)  # Smaller for 4-channel latent
+    parser.add_argument('--batch_size', type=int, default=18)  # Reduced for 16GB GPU
     parser.add_argument('--num_workers', type=int, default=0)
     
     # Model
@@ -235,6 +294,14 @@ def main():
     parser.add_argument('--lr', type=float, default=4.5e-6)  # SD's learning rate
     parser.add_argument('--kl_weight', type=float, default=1e-6)  # Very small KL weight
     parser.add_argument('--warmup_epochs', type=int, default=5)
+    
+    # Perceptual loss settings
+    parser.add_argument('--use_perceptual', action='store_true', 
+                       help='Use perceptual loss after warmup')
+    parser.add_argument('--perceptual_weight', type=float, default=0.05,
+                       help='Weight for perceptual loss')
+    parser.add_argument('--perceptual_start_epoch', type=int, default=10,
+                       help='Epoch to start using perceptual loss')
     parser.add_argument('--patience', type=int, default=20, help='Early stopping patience')
     parser.add_argument('--min_delta', type=float, default=1e-4, 
                        help='Minimum improvement for early stopping')
@@ -342,6 +409,24 @@ def main():
         start_epoch = checkpoint['epoch']
         print(f"Resumed from epoch {start_epoch}")
     
+    # Initialize perceptual loss if requested
+    perceptual_loss_fn = None
+    if args.use_perceptual:
+        if not PERCEPTUAL_AVAILABLE:
+            print("\n警告: 感知损失模块不可用，将使用标准MSE损失")
+            args.use_perceptual = False
+        else:
+            perceptual_loss_fn = CombinedPerceptualLoss(
+                mse_weight=1.0,  # Keep full MSE
+                perceptual_weight=args.perceptual_weight,
+                style_weight=0.0,  # No style loss for spectrograms
+                loss_type='vgg',
+                device=device
+            )
+            print(f"\n感知损失配置:")
+            print(f"  - 将在第 {args.perceptual_start_epoch} epoch后启用")
+            print(f"  - 感知损失权重: {args.perceptual_weight}")
+    
     # Training
     best_val_loss = float('inf')
     patience_counter = 0
@@ -362,11 +447,24 @@ def main():
             
         print(f"KL weight: {kl_weight:.2e}")
         
+        # Decide whether to use perceptual loss
+        current_perceptual_fn = None
+        if args.use_perceptual and epoch >= args.perceptual_start_epoch:
+            current_perceptual_fn = perceptual_loss_fn
+            print(f"感知损失: 已启用 (权重={args.perceptual_weight})")
+        elif args.use_perceptual:
+            epochs_until_perceptual = args.perceptual_start_epoch - epoch
+            print(f"感知损失: {epochs_until_perceptual} epoch后启用")
+        
         # Train
-        train_losses = train_epoch(model, train_loader, optimizer, kl_weight, device)
+        train_losses = train_epoch(model, train_loader, optimizer, kl_weight, device, current_perceptual_fn)
         print(f"Train - Loss: {train_losses['loss']:.4f}, "
               f"Rec: {train_losses['rec_loss']:.4f}, "
-              f"KL: {train_losses['kl_loss']:.4f}")
+              f"KL: {train_losses['kl_loss']:.4f}", end='')
+        if train_losses.get('perceptual_loss', 0) > 0:
+            print(f", Perceptual: {train_losses['perceptual_loss']:.4f}")
+        else:
+            print()
         
         # Validate - 每个epoch都生成可视化
         sample_path = os.path.join(args.checkpoint_dir, f'samples_epoch_{epoch+1}.png')
@@ -379,19 +477,20 @@ def main():
               f"Rec: {val_losses['rec_loss']:.4f}, "
               f"KL: {val_losses['kl_loss']:.4f}")
         
-        # Save checkpoint
+        # Create checkpoint data (always create it for potential best model saving)
+        checkpoint = {
+            'epoch': epoch + 1,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'train_loss': train_losses,
+            'val_loss': val_losses,
+            'scale_factor': model.scale_factor,
+            'embed_dim': model.embed_dim,
+            'model_type': 'kl_vae_ddpm'
+        }
+        
+        # Save periodic checkpoint
         if (epoch + 1) % args.save_every == 0:
-            checkpoint = {
-                'epoch': epoch + 1,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'train_loss': train_losses,
-                'val_loss': val_losses,
-                'scale_factor': model.scale_factor,
-                'embed_dim': model.embed_dim,
-                'model_type': 'kl_vae_ddpm'
-            }
-            
             checkpoint_path = os.path.join(
                 args.checkpoint_dir,
                 f'kl_vae_epoch_{epoch+1}.pt'

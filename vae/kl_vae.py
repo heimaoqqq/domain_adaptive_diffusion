@@ -281,11 +281,10 @@ class KL_VAE(nn.Module):
         
         # Default config (4x downsampling)
         if ddconfig is None:
-            ddconfig = dict(
+            encoder_config = dict(
                 double_z=True,
                 z_channels=embed_dim,
                 in_channels=3,
-                out_ch=3,
                 ch=128,
                 ch_mult=(1, 2, 2, 4),  # 4x downsampling: 256->128->64->32->16->64
                 num_res_blocks=2,
@@ -293,8 +292,22 @@ class KL_VAE(nn.Module):
                 dropout=0.0
             )
             
-        self.encoder = Encoder(**ddconfig)
-        self.decoder = Decoder(**ddconfig)
+            decoder_config = dict(
+                z_channels=embed_dim,
+                out_ch=3,
+                ch=128,
+                ch_mult=(1, 2, 2, 4),
+                num_res_blocks=2,
+                attn_resolutions=(16,),
+                dropout=0.0
+            )
+        else:
+            # Extract encoder and decoder configs from ddconfig
+            encoder_config = {k: v for k, v in ddconfig.items() if k != 'out_ch'}
+            decoder_config = {k: v for k, v in ddconfig.items() if k != 'in_channels' and k != 'double_z'}
+            
+        self.encoder = Encoder(**encoder_config)
+        self.decoder = Decoder(**decoder_config)
         
         # Convolutions for distribution parameters
         self.quant_conv = nn.Conv2d(2*embed_dim, 2*embed_dim, 1)
@@ -339,12 +352,21 @@ class KL_VAE(nn.Module):
         z = z / self.scale_factor
         return self.decode(z)
         
-    def get_loss(self, inputs: torch.Tensor, kl_weight: float = 1e-6) -> Dict[str, torch.Tensor]:
-        """Compute VAE loss"""
+    def get_loss(self, inputs: torch.Tensor, kl_weight: float = 1e-6, 
+                 perceptual_loss_fn=None) -> Dict[str, torch.Tensor]:
+        """Compute VAE loss with optional perceptual loss"""
         reconstructions, posterior = self(inputs)
         
-        # Reconstruction loss (perceptual loss would be better but requires external model)
-        rec_loss = F.mse_loss(inputs, reconstructions)
+        # Reconstruction loss
+        if perceptual_loss_fn is not None:
+            # Use perceptual loss
+            loss_dict = perceptual_loss_fn(reconstructions, inputs)
+            rec_loss = loss_dict['total']
+            perceptual_loss = loss_dict.get('perceptual', torch.tensor(0.0))
+        else:
+            # Default MSE loss
+            rec_loss = F.mse_loss(inputs, reconstructions)
+            perceptual_loss = torch.tensor(0.0)
         
         # KL loss
         kl_loss = posterior.kl()
@@ -356,5 +378,6 @@ class KL_VAE(nn.Module):
         return {
             'loss': loss,
             'rec_loss': rec_loss,
-            'kl_loss': kl_loss
+            'kl_loss': kl_loss,
+            'perceptual_loss': perceptual_loss
         }
