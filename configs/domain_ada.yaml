@@ -175,6 +175,14 @@ experiment:
 # Random seed
 seed: 42
 
+# Logging settings
+logging:
+  use_wandb: false  # 默认不使用wandb
+  use_tensorboard: true
+  log_every: 10
+  wandb_project: "domain-adaptive-diffusion"
+  wandb_entity: null  # 填入你的wandb用户名（如果需要）
+
 # Debug settings
 debug:
   verbose: true
