@@ -309,16 +309,18 @@ class EpochBasedTrainer:
         phase_config = self.config['training'][phase]
         warmup_epochs = phase_config.get('warmup_epochs', 5)
         
+        # 确保学习率是浮点数
+        base_lr = float(phase_config['learning_rate'])
+        lr_min = float(self.config['training'].get('lr_min', 1e-6))
+        
         # 计算当前epoch的学习率
         if epoch < warmup_epochs:
             # Warmup阶段
-            lr = phase_config['learning_rate'] * (epoch + 1) / warmup_epochs
+            lr = base_lr * (epoch + 1) / warmup_epochs
         else:
             # Cosine退火
             progress = (epoch - warmup_epochs) / (total_epochs - warmup_epochs)
-            lr = self.config['training'].get('lr_min', 1e-6) + \
-                 0.5 * (phase_config['learning_rate'] - self.config['training'].get('lr_min', 1e-6)) * \
-                 (1 + np.cos(np.pi * progress))
+            lr = lr_min + 0.5 * (base_lr - lr_min) * (1 + np.cos(np.pi * progress))
         
         # 设置学习率
         for param_group in self.optimizer.param_groups:
@@ -537,7 +539,7 @@ class EpochBasedTrainer:
         
         # 获取阶段配置
         phase_config = self.config['training'][phase]
-        num_epochs = phase_config['epochs']
+        num_epochs = phase_config.get('epochs', phase_config.get('num_epochs', 20))
         
         # 创建数据加载器
         batch_size = phase_config.get('batch_size', 32)
