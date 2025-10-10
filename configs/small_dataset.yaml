@@ -42,8 +42,9 @@ training:
   pretrain:
     epochs: 80  # 增加到80轮确保充分预训练
     batch_size: 128  # 利用latent space的高效性
-    learning_rate: 1e-4
+    learning_rate: 2e-4  # 提高学习率
     weight_decay: 0.01  # L2正则化
+    warmup_epochs: 0  # 禁用warmup，直接使用完整学习率
     
   # 阶段2: 域对齐
   align:
