@@ -338,7 +338,7 @@ class EpochBasedTrainer:
             # 采样时间步
             batch_size = latents.shape[0]
             t = torch.randint(
-                0, self.diffusion.timesteps, (batch_size,),
+                0, self.diffusion.num_timesteps, (batch_size,),
                 device=self.device, dtype=torch.long
             )
             
@@ -425,7 +425,7 @@ class EpochBasedTrainer:
                 # 随机时间步
                 batch_size = latents.shape[0]
                 t = torch.randint(
-                    0, self.diffusion.timesteps, (batch_size,),
+                    0, self.diffusion.num_timesteps, (batch_size,),
                     device=self.device, dtype=torch.long
                 )
                 
