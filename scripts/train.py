@@ -69,15 +69,20 @@ class EpochBasedTrainer:
         set_seed(config.get('seed', 42))
         
         # 创建实验目录
+        # 使用output_dir（如果在命令行中指定）或默认值
+        base_dir = config.get('experiment', {}).get('output_dir', './checkpoints')
+        if 'paths' in config and 'checkpoint_dir' in config['paths']:
+            base_dir = config['paths']['checkpoint_dir']
+            
         self.exp_dir = create_exp_dir(
-            config['paths']['checkpoint_dir'],
+            base_dir,
             config.get('experiment', {}).get('name', 'domain_ada'),
             config
         )
         self.checkpoint_dir = Path(self.exp_dir) / 'checkpoints'
         self.sample_dir = Path(self.exp_dir) / 'samples'
-        self.checkpoint_dir.mkdir(exist_ok=True)
-        self.sample_dir.mkdir(exist_ok=True)
+        self.checkpoint_dir.mkdir(exist_ok=True, parents=True)
+        self.sample_dir.mkdir(exist_ok=True, parents=True)
         
         # 初始化模型
         self._init_models()
@@ -137,14 +142,19 @@ class EpochBasedTrainer:
         print(f"UNet parameters: {count_parameters(self.unet):,}")
         
         # 创建扩散模型
-        from utils import create_diffusion_config
-        diffusion_config_dict = create_diffusion_config(self.config)
-        
         self.diffusion = DomainAdaptiveDiffusion(
-            input_channels=model_config['channels'],
+            model=self.unet,
             image_size=self.config['data']['image_size'],
-            num_domains=model_config['num_domains'],
-            **diffusion_config_dict
+            timesteps=diffusion_config.get('timesteps', 1000),
+            sampling_timesteps=diffusion_config.get('sampling_timesteps', None),
+            loss_type=diffusion_config.get('loss_type', 'l2'),
+            objective=diffusion_config.get('objective', 'pred_noise'),
+            beta_schedule=diffusion_config.get('beta_schedule', 'cosine'),
+            ddim_sampling_eta=diffusion_config.get('ddim_sampling_eta', 0.0),
+            auto_normalize=diffusion_config.get('auto_normalize', True),
+            offset_noise_strength=diffusion_config.get('offset_noise_strength', 0.0),
+            min_snr_loss_weight=diffusion_config.get('min_snr_loss_weight', False),
+            min_snr_gamma=diffusion_config.get('min_snr_gamma', 5)
         ).to(self.device)
         
         # EMA
