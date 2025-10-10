@@ -40,14 +40,15 @@ class DomainConditionalUnet(nn.Module):
         super().__init__()
         
         # 基础UNet (来自denoising-diffusion-pytorch)
-        # 使用额外的通道来传递条件信息
+        # 重要修复：输入输出通道必须匹配
         self.cond_channels = 2  # 1 for class, 1 for domain
+        total_channels = channels + self.cond_channels
         self.base_unet = Unet(
             dim=dim,
             init_dim=None,
-            out_dim=channels if not learned_variance else channels * 2,
+            out_dim=total_channels if not learned_variance else total_channels * 2,  # 输出也要6个通道
             dim_mults=dim_mults,
-            channels=channels + self.cond_channels,  # 增加条件通道
+            channels=total_channels,  # 输入6个通道
             self_condition=self_condition,
             resnet_block_groups=resnet_block_groups,
             learned_variance=learned_variance,
@@ -145,10 +146,11 @@ class DomainConditionalUnet(nn.Module):
             x_self_cond_full = None
         
         # 调用base_unet
-        # 注意：base_unet期望输入通道数是C+2
+        # 注意：base_unet现在输入输出都是6通道
         output = self.base_unet(x_with_cond, time, x_self_cond_full)
         
-        # 只返回前C个通道（对应原始latent channels）
+        # 只返回前C个通道（对应原始latent channels的噪声预测）
+        # 后2个通道是条件通道的预测，我们不需要
         return output[:, :c]
     
 
