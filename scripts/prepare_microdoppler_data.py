@@ -96,74 +96,86 @@ def load_classifier(checkpoint_path: str, device: str) -> nn.Module:
         print(f"Checkpoint类型: {type(checkpoint)}")
     
     try:
-        # 使用标准ResNet18
-        import torchvision.models as models
-        model = models.resnet18(pretrained=False)
-        num_features = model.fc.in_features
-        
-        # 检查checkpoint格式
-        if isinstance(checkpoint, dict):
-            # checkpoint是字典格式
-            if 'model_state_dict' in checkpoint:
-                # 从improved_classifier_training.py保存的格式
-                state_dict = checkpoint['model_state_dict']
+        # 检查是否是ImprovedClassifier格式（包含backbone）
+        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+            state_dict = checkpoint['model_state_dict']
+            
+            # 检查是否有backbone前缀
+            has_backbone = any(key.startswith('backbone.') for key in state_dict.keys())
+            
+            if has_backbone:
+                # 这是ImprovedClassifier格式，需要提取backbone部分
+                print("检测到ImprovedClassifier格式，提取backbone权重...")
                 
                 # 获取类别数
-                if 'num_classes' in checkpoint:
+                if 'classifier.5.weight' in state_dict:
+                    num_classes = state_dict['classifier.5.weight'].shape[0]
+                elif 'num_classes' in checkpoint:
                     num_classes = checkpoint['num_classes']
-                elif 'args' in checkpoint and 'num_classes' in checkpoint['args']:
-                    num_classes = checkpoint['args']['num_classes']
-                else:
-                    # 从权重推断
-                    fc_weight_key = 'fc.weight'
-                    if fc_weight_key in state_dict:
-                        num_classes = state_dict[fc_weight_key].shape[0]
+                elif 'args' in checkpoint:
+                    args = checkpoint['args']
+                    if isinstance(args, dict) and 'num_classes' in args:
+                        num_classes = args['num_classes']
+                    elif hasattr(args, 'num_classes'):
+                        num_classes = args.num_classes
                     else:
-                        num_classes = 31  # 默认31个用户
-                        
+                        num_classes = 31
+                else:
+                    num_classes = 31
+                
+                # 创建标准ResNet18
+                import torchvision.models as models
+                model = models.resnet18(pretrained=False)
+                
+                # 提取backbone权重（去掉'backbone.'前缀）
+                backbone_state_dict = {}
+                for key, value in state_dict.items():
+                    if key.startswith('backbone.'):
+                        # 去掉'backbone.'前缀
+                        new_key = key[9:]  # len('backbone.') = 9
+                        if new_key != 'fc.weight' and new_key != 'fc.bias':  # 跳过Identity层
+                            backbone_state_dict[new_key] = value
+                
+                # 加载backbone权重
+                model.load_state_dict(backbone_state_dict, strict=False)
+                
                 # 修改最后一层
+                num_features = model.fc.in_features
                 model.fc = nn.Linear(num_features, num_classes)
                 
-                # 加载权重
+                # 如果有分类器权重，使用原始分类器的权重初始化fc层
+                if 'classifier.5.weight' in state_dict and 'classifier.5.bias' in state_dict:
+                    model.fc.weight.data = state_dict['classifier.5.weight']
+                    model.fc.bias.data = state_dict['classifier.5.bias']
+                    print("使用原始分类器权重初始化fc层")
+                
+                print(f"成功加载分类器backbone，类别数: {num_classes}")
+                
+            else:
+                # 标准ResNet格式
+                print("标准ResNet格式，直接加载...")
+                import torchvision.models as models
+                model = models.resnet18(pretrained=False)
+                
+                # 获取类别数
+                if 'fc.weight' in state_dict:
+                    num_classes = state_dict['fc.weight'].shape[0]
+                else:
+                    num_classes = 31
+                    
+                num_features = model.fc.in_features
+                model.fc = nn.Linear(num_features, num_classes)
                 model.load_state_dict(state_dict)
                 print(f"成功加载分类器，类别数: {num_classes}")
                 
-            elif 'state_dict' in checkpoint:
-                # 其他可能的格式
-                state_dict = checkpoint['state_dict']
-                # 查找fc层的输出维度
-                fc_weight_key = 'fc.weight' if 'fc.weight' in state_dict else 'module.fc.weight'
-                if fc_weight_key in state_dict:
-                    num_classes = state_dict[fc_weight_key].shape[0]
-                else:
-                    num_classes = 31
-                    
-                model.fc = nn.Linear(num_features, num_classes)
-                model.load_state_dict(state_dict)
-                
-            else:
-                # checkpoint直接是state_dict
-                # 推断类别数
-                if 'fc.weight' in checkpoint:
-                    num_classes = checkpoint['fc.weight'].shape[0]
-                else:
-                    num_classes = 31
-                    
-                model.fc = nn.Linear(num_features, num_classes)
-                model.load_state_dict(checkpoint)
         else:
-            # checkpoint直接是state_dict（旧格式）
-            if 'fc.weight' in checkpoint:
-                num_classes = checkpoint['fc.weight'].shape[0]
-            else:
-                num_classes = 31
-                
-            model.fc = nn.Linear(num_features, num_classes)
-            model.load_state_dict(checkpoint)
+            raise ValueError("不支持的checkpoint格式")
             
     except Exception as e:
         print(f"加载分类器时出错: {e}")
         print("请检查分类器checkpoint的格式")
+        import traceback
+        traceback.print_exc()
         return None
     
     model.to(device)
@@ -183,24 +195,34 @@ def extract_features(model: nn.Module, image_paths: List[str], device: str) -> n
     features = []
     model.eval()
     
-    # 临时移除fc层以获取特征
-    if hasattr(model, 'fc'):
-        original_fc = model.fc
-        model.fc = nn.Identity()
+    # 创建一个钩子来获取倒数第二层的特征
+    activation = {}
+    def get_activation(name):
+        def hook(model, input, output):
+            activation[name] = output
+        return hook
     
-    with torch.no_grad():
-        for img_path in image_paths:
-            # 加载和预处理图像
-            image = Image.open(img_path).convert('RGB')
-            image = transform(image).unsqueeze(0).to(device)
-            
-            # 提取特征
-            feature = model(image)
-            features.append(feature.cpu().numpy().flatten())
+    # 注册钩子到avgpool层（ResNet18的倒数第二层）
+    hook_handle = model.avgpool.register_forward_hook(get_activation('avgpool'))
     
-    # 恢复fc层
-    if hasattr(model, 'fc'):
-        model.fc = original_fc
+    try:
+        with torch.no_grad():
+            for img_path in image_paths:
+                # 加载和预处理图像
+                image = Image.open(img_path).convert('RGB')
+                image = transform(image).unsqueeze(0).to(device)
+                
+                # 前向传播
+                _ = model(image)
+                
+                # 从钩子获取特征
+                feature = activation['avgpool']
+                feature = feature.squeeze()  # 移除批次和空间维度
+                features.append(feature.cpu().numpy())
+        
+    finally:
+        # 移除钩子
+        hook_handle.remove()
     
     return np.array(features)
 
