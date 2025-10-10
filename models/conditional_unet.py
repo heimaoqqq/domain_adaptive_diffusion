@@ -166,36 +166,31 @@ class DomainConditionalUnet(nn.Module):
     ) -> torch.Tensor:
         """
         带条件的前向传播
-        这里需要hack一下base_unet的forward方法
+        修复版：正确注入条件到时间嵌入
         """
-        # 保存原始forward方法
-        original_forward = self.base_unet.forward
+        if condition is None:
+            # 无条件，直接调用base_unet
+            return self.base_unet(x, time, x_self_cond)
         
-        # 临时修改forward以注入条件
-        def conditional_forward(x_inner, t_inner, x_self_cond_inner=None):
-            # 获取时间嵌入
-            if hasattr(self.base_unet, 'time_mlp'):
-                t_emb = self.base_unet.time_mlp(t_inner)
-            else:
-                # 如果没有time_mlp，创建一个简单的时间嵌入
-                t_emb = self.base_unet.time_emb(t_inner)
-            
-            # 注入条件
-            if condition is not None:
-                t_emb = t_emb + condition
-            
-            # 继续原始forward流程（这部分需要根据具体实现调整）
-            # 这里简化处理，实际可能需要更复杂的集成
-            return original_forward(x_inner, t_inner, x_self_cond_inner)
+        # 保存原始的time_mlp
+        original_time_mlp = self.base_unet.time_mlp
         
-        # 临时替换forward
-        self.base_unet.forward = conditional_forward
+        # 创建带条件的时间嵌入函数
+        def time_mlp_with_condition(t):
+            # 获取原始时间嵌入
+            t_emb = original_time_mlp(t)
+            # 添加条件
+            return t_emb + condition
         
-        # 执行前向传播
-        output = self.base_unet(x, time, x_self_cond)
+        # 临时替换time_mlp
+        self.base_unet.time_mlp = time_mlp_with_condition
         
-        # 恢复原始forward
-        self.base_unet.forward = original_forward
+        try:
+            # 执行前向传播
+            output = self.base_unet(x, time, x_self_cond)
+        finally:
+            # 恢复原始time_mlp
+            self.base_unet.time_mlp = original_time_mlp
         
         return output
 
