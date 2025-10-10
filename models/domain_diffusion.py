@@ -30,7 +30,6 @@ class DomainAdaptiveDiffusion(GaussianDiffusion):
         image_size: int = 64,  # latent size (256/4 for KL-VAE)
         timesteps: int = 1000,
         sampling_timesteps: Optional[int] = None,
-        loss_type: str = 'l2',
         objective: str = 'pred_v',  # 'pred_noise' | 'pred_x0' | 'pred_v'
         beta_schedule: str = 'cosine',
         schedule_fn_kwargs: dict = dict(),
@@ -43,14 +42,16 @@ class DomainAdaptiveDiffusion(GaussianDiffusion):
         mmd_loss_weight: float = 0.1,
         mmd_kernel_bandwidth: float = 1.0,
         domain_balance_ratio: float = 0.8,  # 源域数据比例
-        use_ema: bool = True
+        use_ema: bool = True,
+        # 兼容参数（不传递给父类）
+        loss_type: str = 'l2',  # 保留接口但不使用
     ):
+        # GaussianDiffusion不支持loss_type参数，直接移除
         super().__init__(
             model,
             image_size=image_size,
             timesteps=timesteps,
             sampling_timesteps=sampling_timesteps,
-            loss_type=loss_type,
             objective=objective,
             beta_schedule=beta_schedule,
             schedule_fn_kwargs=schedule_fn_kwargs,
@@ -60,6 +61,9 @@ class DomainAdaptiveDiffusion(GaussianDiffusion):
             min_snr_loss_weight=min_snr_loss_weight,
             min_snr_gamma=min_snr_gamma
         )
+        
+        # 保存loss_type供自定义使用
+        self.loss_type = loss_type
         
         # 域适应参数
         self.mmd_loss_weight = mmd_loss_weight
