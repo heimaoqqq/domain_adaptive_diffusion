@@ -686,8 +686,21 @@ def main():
     parser.add_argument('--use-wandb', action='store_true',
                         help='Enable wandb logging (requires wandb package)')
     
-    # 覆盖配置的参数
+    # 常用参数的简化版本
+    parser.add_argument('--data_dir', type=str, 
+                        help='Path to processed latent data (same as --data.latent_path)')
+    parser.add_argument('--vae_checkpoint', type=str,
+                        help='Path to VAE checkpoint (same as --vae.checkpoint)')
+    parser.add_argument('--output_dir', type=str, default=None,
+                        help='Output directory for checkpoints')
+    parser.add_argument('--batch_size', type=int, default=None,
+                        help='Override batch size for all phases')
+    parser.add_argument('--num_epochs', type=int, default=None,
+                        help='Override total epochs (distributed across phases)')
+    
+    # 覆盖配置的参数（完整路径版本）
     parser.add_argument('--data.latent_path', type=str, help='Override data path')
+    parser.add_argument('--vae.checkpoint', type=str, help='Override VAE checkpoint')
     parser.add_argument('--experiment.name', type=str, help='Override experiment name')
     parser.add_argument('--training.pretrain.epochs', type=int, help='Override pretrain epochs')
     parser.add_argument('--training.align.epochs', type=int, help='Override align epochs')
@@ -697,6 +710,51 @@ def main():
     
     # 加载配置
     config = load_config(args.config)
+    
+    # 处理简化参数映射
+    if args.data_dir:
+        if 'data' not in config:
+            config['data'] = {}
+        config['data']['latent_path'] = args.data_dir
+        
+    if args.vae_checkpoint:
+        if 'vae' not in config:
+            config['vae'] = {}
+        config['vae']['checkpoint'] = args.vae_checkpoint
+        
+    if args.output_dir:
+        if 'experiment' not in config:
+            config['experiment'] = {}
+        config['experiment']['output_dir'] = args.output_dir
+        
+    if args.batch_size is not None:
+        # 应用到所有训练阶段
+        for phase in ['pretrain', 'align', 'finetune']:
+            if 'training' not in config:
+                config['training'] = {}
+            if phase not in config['training']:
+                config['training'][phase] = {}
+            if phase == 'align':
+                # 对齐阶段特殊处理
+                config['training'][phase]['batch_size_source'] = int(args.batch_size * 0.75)
+                config['training'][phase]['batch_size_target'] = int(args.batch_size * 0.25)
+            else:
+                config['training'][phase]['batch_size'] = args.batch_size
+                
+    if args.num_epochs is not None:
+        # 按比例分配到各阶段 (例如: 40% pretrain, 40% align, 20% finetune)
+        pretrain_epochs = int(args.num_epochs * 0.4)
+        align_epochs = int(args.num_epochs * 0.4)
+        finetune_epochs = args.num_epochs - pretrain_epochs - align_epochs
+        
+        if 'training' not in config:
+            config['training'] = {}
+        for phase, epochs in [('pretrain', pretrain_epochs), 
+                              ('align', align_epochs), 
+                              ('finetune', finetune_epochs)]:
+            if phase not in config['training']:
+                config['training'][phase] = {}
+            config['training'][phase]['epochs'] = epochs
     
     # 处理wandb设置
     if args.no_wandb:
@@ -713,8 +771,12 @@ def main():
             import sys
             sys.exit(1)
     
-    # 应用命令行覆盖
+    # 应用命令行覆盖（处理带点的参数）
+    skip_keys = {'config', 'device', 'resume', 'no_wandb', 'use_wandb', 
+                 'data_dir', 'vae_checkpoint', 'output_dir', 'batch_size', 'num_epochs'}
     for key, value in vars(args).items():
+        if key in skip_keys:
+            continue
         if value is not None and '.' in key:
             # 处理嵌套配置
             keys = key.split('.')
