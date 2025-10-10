@@ -26,6 +26,7 @@ diffusion:
   offset_noise_strength: 0.1  # 轻微噪声增强泛化
   min_snr_loss_weight: true  # 稳定训练
   min_snr_gamma: 5
+  scale_factor: 0.18215  # VAE的scale_factor，用于正确的latent范围
 
 # 域适应配置
 domain_adaptation:
