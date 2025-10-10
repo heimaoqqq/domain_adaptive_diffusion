@@ -43,6 +43,8 @@ class DomainAdaptiveDiffusion(GaussianDiffusion):
         mmd_kernel_bandwidth: float = 1.0,
         domain_balance_ratio: float = 0.8,  # 源域数据比例
         use_ema: bool = True,
+        # VAE latent相关
+        scale_factor: float = 0.18215,  # VAE的scale_factor
         # 兼容参数（不传递给父类）
         loss_type: str = 'l2',  # 保留接口但不使用
     ):
@@ -64,6 +66,9 @@ class DomainAdaptiveDiffusion(GaussianDiffusion):
         
         # 保存loss_type供自定义使用
         self.loss_type = loss_type
+        
+        # 保存VAE相关参数
+        self.scale_factor = scale_factor
         
         # 保存父类可能不暴露的属性
         self.min_snr_loss_weight = min_snr_loss_weight
@@ -412,8 +417,10 @@ class DomainAdaptiveDiffusion(GaussianDiffusion):
             elif self.objective == 'pred_v':
                 pred_x0 = torch.sqrt(alpha) * img - torch.sqrt(1 - alpha) * pred_noise
             
-            # 裁剪x0
-            pred_x0 = torch.clamp(pred_x0, -1, 1)
+            # 裁剪x0 - 注意我们的latent是scale_factor缩放后的
+            # VAE latent范围大约是 [-3*scale_factor, 3*scale_factor]
+            clamp_range = 3.0 * self.scale_factor  
+            pred_x0 = torch.clamp(pred_x0, -clamp_range, clamp_range)
             
             # 计算方差
             sigma = eta * torch.sqrt((1 - alpha_next) / (1 - alpha)) * torch.sqrt(1 - alpha / alpha_next)
