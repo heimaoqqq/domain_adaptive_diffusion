@@ -65,6 +65,10 @@ class DomainAdaptiveDiffusion(GaussianDiffusion):
         # 保存loss_type供自定义使用
         self.loss_type = loss_type
         
+        # 保存min_snr参数（父类可能不暴露这些属性）
+        self.min_snr_loss_weight = min_snr_loss_weight
+        self.min_snr_gamma = min_snr_gamma
+        
         # 域适应参数
         self.mmd_loss_weight = mmd_loss_weight
         self.mmd_kernel_bandwidth = mmd_kernel_bandwidth
@@ -211,7 +215,7 @@ class DomainAdaptiveDiffusion(GaussianDiffusion):
         loss = reduce(loss, 'b ... -> b', 'mean')
         
         # 应用min SNR加权（可选）
-        if self.min_snr_loss_weight:
+        if self.min_snr_loss_weight and hasattr(self, 'alphas_cumprod'):
             snr = self.alphas_cumprod[t] / (1 - self.alphas_cumprod[t])
             min_snr_gamma = self.min_snr_gamma
             weight = torch.clamp(snr, max=min_snr_gamma) / snr
