@@ -110,8 +110,14 @@ class DomainConditionalUnet(nn.Module):
         
         # 类别条件通道
         if class_labels is not None:
-            # 归一化到[-1, 1]
-            class_channel = (class_labels.float() / (self.num_classes + 1) - 0.5) * 2
+            # 检查是否为null class（num_classes表示null）
+            is_null = (class_labels == self.num_classes)
+            # 归一化到[-1, 1]，但null class设为1
+            class_channel = torch.where(
+                is_null,
+                torch.ones_like(class_labels, dtype=torch.float),  # null class -> 1
+                (class_labels.float() / self.num_classes - 0.5) * 2  # 正常类别归一化
+            )
         else:
             # 默认使用null class
             class_channel = torch.ones(batch_size, device=device)  # 1 表示null
