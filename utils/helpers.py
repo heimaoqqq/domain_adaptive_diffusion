@@ -209,7 +209,8 @@ class EMA:
 def create_exp_dir(
     base_dir: str,
     exp_name: Optional[str] = None,
-    config: Optional[Dict] = None
+    config: Optional[Dict] = None,
+    use_timestamp: bool = False  # 新增参数，控制是否使用时间戳
 ) -> str:
     """
     创建实验目录
@@ -218,21 +219,27 @@ def create_exp_dir(
         base_dir: 基础目录
         exp_name: 实验名称
         config: 配置字典（会保存到目录中）
+        use_timestamp: 是否在目录名中添加时间戳
     
     Returns:
         实验目录路径
     """
-    # 生成时间戳
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    
-    # 创建目录名
-    if exp_name:
-        dir_name = f"{timestamp}_{exp_name}"
+    if use_timestamp:
+        # 生成时间戳
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        
+        # 创建目录名
+        if exp_name:
+            dir_name = f"{timestamp}_{exp_name}"
+        else:
+            dir_name = timestamp
+        
+        # 创建目录
+        exp_dir = Path(base_dir) / dir_name
     else:
-        dir_name = timestamp
+        # 直接使用base_dir，不创建子文件夹
+        exp_dir = Path(base_dir)
     
-    # 创建目录
-    exp_dir = Path(base_dir) / dir_name
     exp_dir.mkdir(parents=True, exist_ok=True)
     
     # 保存配置
