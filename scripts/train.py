@@ -125,9 +125,8 @@ class EpochBasedTrainer:
         # 创建UNet
         self.unet = DomainConditionalUnet(
             dim=model_config['dim'],
-            dim_mults=model_config['dim_mults'],
+            dim_mults=tuple(model_config['dim_mults']),  # 确保是tuple
             channels=model_config['channels'],
-            out_dim=model_config['channels'],
             num_classes=model_config['num_classes'],
             num_domains=model_config['num_domains'],
             self_condition=model_config.get('self_condition', True),
