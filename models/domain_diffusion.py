@@ -390,7 +390,8 @@ class DomainAdaptiveDiffusion(GaussianDiffusion):
                 pred_noise_cond = model(img, time_cond, class_labels, domain_labels)
                 
                 # 无条件预测（null class，源域）
-                null_class = torch.full_like(class_labels, model.class_embedding.num_embeddings - 1)
+                # 使用model.num_classes而不是class_embedding
+                null_class = torch.full_like(class_labels, model.num_classes)  # num_classes作为null class
                 null_domain = torch.zeros_like(domain_labels)
                 pred_noise_uncond = model(img, time_cond, null_class, null_domain)
                 
