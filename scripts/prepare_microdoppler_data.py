@@ -1,5 +1,6 @@
 """
-简化版微多普勒数据准备脚本
+微多普勒数据准备脚本
+支持随机和基于分类器的diversity样本选择策略
 专门为小数据集和KL-VAE设计
 """
 
@@ -15,6 +16,8 @@ from tqdm import tqdm
 import random
 import os
 import sys
+from sklearn.cluster import KMeans
+import torchvision.transforms as transforms
 
 # 添加项目路径
 sys.path.append(str(Path(__file__).parent.parent))
@@ -82,13 +85,134 @@ def split_data(user_data: Dict[str, List], train_ratio: float = 0.8) -> Tuple[Li
     return train_data, val_data
 
 
-def select_fewshot_samples(user_data: Dict[str, List], n_shot: int = 5) -> List:
-    """为每个用户选择few-shot样本"""
+def load_classifier(checkpoint_path: str, device: str) -> nn.Module:
+    """加载源域分类器"""
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    
+    # 尝试从domain_adaptation_experiment导入
+    sys.path.append(str(Path(__file__).parent.parent.parent / 'domain_adaptation_experiment'))
+    try:
+        # 根据checkpoint判断模型类型
+        if 'resnet18' in checkpoint_path.lower() or 'improved' in checkpoint_path.lower():
+            # 使用标准ResNet18
+            import torchvision.models as models
+            model = models.resnet18(pretrained=False)
+            num_features = model.fc.in_features
+            
+            # 根据checkpoint获取类别数
+            if 'state_dict' in checkpoint:
+                state_dict = checkpoint['state_dict']
+                # 查找fc层的输出维度
+                fc_weight_key = 'fc.weight' if 'fc.weight' in state_dict else 'module.fc.weight'
+                if fc_weight_key in state_dict:
+                    num_classes = state_dict[fc_weight_key].shape[0]
+                else:
+                    num_classes = 31  # 默认31个用户
+            else:
+                num_classes = 31
+                
+            model.fc = nn.Linear(num_features, num_classes)
+            
+            # 加载权重
+            if 'state_dict' in checkpoint:
+                model.load_state_dict(checkpoint['state_dict'])
+            else:
+                model.load_state_dict(checkpoint)
+        else:
+            raise ValueError("未知的分类器类型")
+            
+    except Exception as e:
+        print(f"加载分类器失败: {e}")
+        print("将使用随机选择策略")
+        return None
+    
+    model.to(device)
+    model.eval()
+    return model
+
+
+def extract_features(model: nn.Module, image_paths: List[str], device: str) -> np.ndarray:
+    """使用分类器提取特征"""
+    transform = transforms.Compose([
+        transforms.Resize((256, 256)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                           std=[0.229, 0.224, 0.225])
+    ])
+    
+    features = []
+    model.eval()
+    
+    # 临时移除fc层以获取特征
+    if hasattr(model, 'fc'):
+        original_fc = model.fc
+        model.fc = nn.Identity()
+    
+    with torch.no_grad():
+        for img_path in image_paths:
+            # 加载和预处理图像
+            image = Image.open(img_path).convert('RGB')
+            image = transform(image).unsqueeze(0).to(device)
+            
+            # 提取特征
+            feature = model(image)
+            features.append(feature.cpu().numpy().flatten())
+    
+    # 恢复fc层
+    if hasattr(model, 'fc'):
+        model.fc = original_fc
+    
+    return np.array(features)
+
+
+def select_fewshot_samples(user_data: Dict[str, List], n_shot: int = 5, 
+                         strategy: str = 'random', classifier: nn.Module = None,
+                         device: str = 'cuda') -> List:
+    """为每个用户选择few-shot样本
+    
+    Args:
+        user_data: 用户数据字典
+        n_shot: 每个用户选择的样本数
+        strategy: 选择策略 ('random' 或 'diversity')
+        classifier: 源域分类器（用于diversity策略）
+        device: 设备
+    """
     fewshot_data = []
     
-    for user_id, data in user_data.items():
-        # 随机选择n_shot个样本
-        selected = random.sample(data, min(n_shot, len(data)))
+    for user_id, data in tqdm(user_data.items(), desc="选择few-shot样本"):
+        if strategy == 'diversity' and classifier is not None:
+            # 使用diversity策略
+            if len(data) <= n_shot:
+                selected = data
+            else:
+                # 提取所有样本的特征
+                image_paths = [d[0] for d in data]
+                features = extract_features(classifier, image_paths, device)
+                
+                # K-means聚类
+                n_clusters = min(n_shot, len(features))
+                kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+                kmeans.fit(features)
+                
+                # 每个簇选择最接近中心的样本
+                selected_indices = []
+                for i in range(n_clusters):
+                    cluster_mask = (kmeans.labels_ == i)
+                    cluster_indices = np.where(cluster_mask)[0]
+                    
+                    if len(cluster_indices) > 0:
+                        # 计算到簇中心的距离
+                        center = kmeans.cluster_centers_[i]
+                        distances = np.sum((features[cluster_indices] - center) ** 2, axis=1)
+                        closest_idx = cluster_indices[np.argmin(distances)]
+                        selected_indices.append(closest_idx)
+                
+                # 根据索引选择样本
+                selected = [data[i] for i in selected_indices[:n_shot]]
+        else:
+            # 随机选择
+            selected = random.sample(data, min(n_shot, len(data)))
+            
         fewshot_data.extend(selected)
         
     return fewshot_data
@@ -175,6 +299,12 @@ def main():
                        help='训练集比例')
     parser.add_argument('--n_shot', type=int, default=5,
                        help='目标域每用户样本数')
+    parser.add_argument('--selection_strategy', type=str, default='random',
+                       choices=['random', 'diversity'],
+                       help='目标域样本选择策略')
+    parser.add_argument('--classifier_checkpoint', type=str, 
+                       default='/kaggle/input/best-improved-classifier-pth/best_improved_classifier.pth',
+                       help='源域分类器路径（用于diversity策略）')
     parser.add_argument('--batch_size', type=int, default=16,
                        help='批次大小')
     parser.add_argument('--seed', type=int, default=42,
@@ -200,13 +330,36 @@ def main():
     print(f"\n源域: {len(source_data)} 用户")
     print(f"目标域: {len(target_data)} 用户")
     
+    # 加载分类器（如果使用diversity策略）
+    classifier = None
+    if args.selection_strategy == 'diversity':
+        print(f"\n加载源域分类器用于diversity选择...")
+        if os.path.exists(args.classifier_checkpoint):
+            classifier = load_classifier(args.classifier_checkpoint, device)
+            if classifier is not None:
+                print("✅ 分类器加载成功，使用diversity策略")
+            else:
+                print("⚠️ 分类器加载失败，退回到随机选择")
+                args.selection_strategy = 'random'
+        else:
+            print(f"⚠️ 分类器文件不存在: {args.classifier_checkpoint}")
+            print("退回到随机选择策略")
+            args.selection_strategy = 'random'
+    
     # 划分数据
     source_train, source_val = split_data(source_data, args.train_ratio)
-    target_fewshot = select_fewshot_samples(target_data, args.n_shot)
+    target_fewshot = select_fewshot_samples(
+        target_data, 
+        args.n_shot,
+        strategy=args.selection_strategy,
+        classifier=classifier,
+        device=device
+    )
     
     print(f"\n数据划分:")
     print(f"源域 - 训练: {len(source_train)}, 验证: {len(source_val)}")
     print(f"目标域 - Few-shot: {len(target_fewshot)} ({args.n_shot}张/用户)")
+    print(f"选择策略: {args.selection_strategy}")
     
     # 加载VAE
     print(f"\n加载VAE模型...")
@@ -254,6 +407,7 @@ def main():
         'target_domain': args.target_domain,
         'n_users': len(source_data),
         'n_shot': args.n_shot,
+        'selection_strategy': args.selection_strategy,
         'latent_shape': [4, 64, 64],  # KL-VAE输出
         'scale_factor': getattr(vae, 'scale_factor', 0.18215)
     }
