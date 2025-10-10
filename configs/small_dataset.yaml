@@ -39,7 +39,7 @@ domain_adaptation:
 training:
   # 阶段1: 预训练
   pretrain:
-    epochs: 50  # 改为epoch制
+    epochs: 80  # 增加到80轮确保充分预训练
     batch_size: 128  # 利用latent space的高效性
     learning_rate: 1e-4
     weight_decay: 0.01  # L2正则化
