@@ -795,7 +795,14 @@ def main():
     args = parser.parse_args()
     
     # 加载配置
+    print(f"\n📄 正在加载配置文件: {args.config}")
     config = load_config(args.config)
+    
+    # 打印配置中的训练轮数
+    print("\n📊 配置文件中的训练轮数:")
+    for phase in ['pretrain', 'align', 'finetune']:
+        phase_epochs = config.get('training', {}).get(phase, {}).get('epochs', 'Not found')
+        print(f"   {phase}: {phase_epochs} epochs")
     
     # 处理简化参数映射
     if args.data_dir:
@@ -828,10 +835,13 @@ def main():
                 config['training'][phase]['batch_size'] = args.batch_size
                 
     if args.num_epochs is not None:
+        print(f"\n⚠️ 使用 --num_epochs {args.num_epochs} 覆盖配置文件中的轮数")
         # 按比例分配到各阶段 (例如: 50% pretrain, 35% align, 15% finetune)
         pretrain_epochs = int(args.num_epochs * 0.5)
         align_epochs = int(args.num_epochs * 0.35)
         finetune_epochs = args.num_epochs - pretrain_epochs - align_epochs
+        
+        print(f"   按比例分配: pretrain={pretrain_epochs}, align={align_epochs}, finetune={finetune_epochs}")
         
         if 'training' not in config:
             config['training'] = {}
