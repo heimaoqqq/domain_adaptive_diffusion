@@ -3,8 +3,8 @@
 # 模型配置 - 减小规模防止过拟合
 model:
   type: "DomainConditionalUnet"
-  dim: 48  # 减小基础维度
-  dim_mults: [1, 2, 3, 4]  # 简化层级
+  dim: 64  # 适中的基础维度，提升质量
+  dim_mults: [1, 2, 4, 8]  # 更好的层级设计
   channels: 4  # KL-VAE latent channels
   num_classes: 31  # 用户数
   num_domains: 2  # 源域和目标域
@@ -22,7 +22,7 @@ diffusion:
   objective: "pred_noise"  # 最简单稳定
   beta_schedule: "cosine"
   ddim_sampling_eta: 0.0
-  auto_normalize: true
+  auto_normalize: false  # VAE latents已经归一化
   offset_noise_strength: 0.1  # 轻微噪声增强泛化
   min_snr_loss_weight: true  # 稳定训练
   min_snr_gamma: 5
@@ -40,22 +40,22 @@ training:
   # 阶段1: 预训练
   pretrain:
     epochs: 50  # 改为epoch制
-    batch_size: 16  # 减小batch防止过拟合
+    batch_size: 128  # 利用latent space的高效性
     learning_rate: 1e-4
     weight_decay: 0.01  # L2正则化
     
   # 阶段2: 域对齐
   align:
     epochs: 80
-    batch_size_source: 12
-    batch_size_target: 4  # 目标域样本少
+    batch_size_source: 96
+    batch_size_target: 32  # 目标域样本少但latent效率高
     learning_rate: 5e-5
     weight_decay: 0.01
     
   # 阶段3: 目标域微调
   finetune:
     epochs: 30
-    batch_size: 8
+    batch_size: 64  # 目标域微调可以用更大batch
     learning_rate: 1e-5
     weight_decay: 0.005
 
