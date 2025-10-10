@@ -143,11 +143,38 @@ def load_classifier(checkpoint_path: str, device: str) -> nn.Module:
                 num_features = model.fc.in_features
                 model.fc = nn.Linear(num_features, num_classes)
                 
-                # 如果有分类器权重，使用原始分类器的权重初始化fc层
-                if 'classifier.5.weight' in state_dict and 'classifier.5.bias' in state_dict:
-                    model.fc.weight.data = state_dict['classifier.5.weight']
-                    model.fc.bias.data = state_dict['classifier.5.bias']
-                    print("使用原始分类器权重初始化fc层")
+                # 检查分类器的结构
+                # classifier.1是第一个Linear层 (512->256)
+                # classifier.5是最终的Linear层 (256->num_classes)
+                if 'classifier.5.weight' in state_dict:
+                    # 原始模型有中间层，我们需要创建相同的结构
+                    classifier_in_features = state_dict['classifier.5.weight'].shape[1]  # 应该是256
+                    print(f"检测到分类器输入维度: {classifier_in_features}")
+                    
+                    # 创建与原始模型相同的分类头
+                    model.fc = nn.Sequential(
+                        nn.Linear(512, 256),
+                        nn.ReLU(),
+                        nn.BatchNorm1d(256),
+                        nn.Dropout(0.3),
+                        nn.Linear(256, num_classes)
+                    )
+                    
+                    # 加载分类器权重
+                    if 'classifier.1.weight' in state_dict:
+                        model.fc[0].weight.data = state_dict['classifier.1.weight']
+                        model.fc[0].bias.data = state_dict['classifier.1.bias']
+                    if 'classifier.2.weight' in state_dict:  # BatchNorm
+                        model.fc[2].weight.data = state_dict['classifier.2.weight']
+                        model.fc[2].bias.data = state_dict['classifier.2.bias']
+                        if 'classifier.2.running_mean' in state_dict:
+                            model.fc[2].running_mean.data = state_dict['classifier.2.running_mean']
+                            model.fc[2].running_var.data = state_dict['classifier.2.running_var']
+                    if 'classifier.5.weight' in state_dict:
+                        model.fc[4].weight.data = state_dict['classifier.5.weight']
+                        model.fc[4].bias.data = state_dict['classifier.5.bias']
+                    
+                    print("使用原始分类器完整结构")
                 
                 print(f"成功加载分类器backbone，类别数: {num_classes}")
                 
