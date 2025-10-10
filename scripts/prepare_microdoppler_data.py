@@ -130,7 +130,18 @@ def encode_data(vae: nn.Module, dataloader: DataLoader, device: str) -> Tuple[to
             images = images.to(device)
             
             # 编码
-            latents = vae.encode(images)
+            posterior = vae.encode(images)
+            
+            # 从分布中采样
+            if hasattr(posterior, 'mode'):
+                # VAE返回的是分布对象，使用mode()获得确定性结果
+                latents = posterior.mode()
+            elif hasattr(posterior, 'sample'):
+                # 备选：使用sample()
+                latents = posterior.sample()
+            else:
+                # 如果直接返回张量
+                latents = posterior
             
             # KL-VAE的scale_factor
             scale_factor = getattr(vae, 'scale_factor', 0.18215)
