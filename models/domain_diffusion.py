@@ -350,7 +350,7 @@ class DomainAdaptiveDiffusion(GaussianDiffusion):
         batch, device = shape[0], self.device
         
         # 采样步数
-        times = torch.linspace(-1, self.timesteps - 1, steps=self.sampling_timesteps + 1)
+        times = torch.linspace(-1, self.num_timesteps - 1, steps=self.sampling_timesteps + 1)
         times = list(reversed(times.int().tolist()))
         time_pairs = list(zip(times[:-1], times[1:]))
         
