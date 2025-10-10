@@ -761,7 +761,7 @@ def main():
                        help='Use perceptual loss after warmup')
     parser.add_argument('--perceptual_weight', type=float, default=0.01,
                        help='Weight for perceptual loss')
-    parser.add_argument('--perceptual_start_epoch', type=int, default=1,
+    parser.add_argument('--perceptual_start_epoch', type=int, default=10,
                        help='Epoch to start using perceptual loss')
     parser.add_argument('--patience', type=int, default=20, help='Early stopping patience')
     parser.add_argument('--min_delta', type=float, default=1e-4, 
