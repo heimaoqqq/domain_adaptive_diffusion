@@ -34,7 +34,7 @@ class DomainAdaptiveDiffusion(GaussianDiffusion):
         beta_schedule: str = 'cosine',
         schedule_fn_kwargs: dict = dict(),
         ddim_sampling_eta: float = 0.0,
-        auto_normalize: bool = True,
+        auto_normalize: bool = False,  # VAE latents已经归一化，不需要额外归一化
         offset_noise_strength: float = 0.0,
         min_snr_loss_weight: bool = False,
         min_snr_gamma: float = 5,
