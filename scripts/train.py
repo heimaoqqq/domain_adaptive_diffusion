@@ -74,13 +74,18 @@ class EpochBasedTrainer:
         if 'paths' in config and 'checkpoint_dir' in config['paths']:
             base_dir = config['paths']['checkpoint_dir']
             
-        self.exp_dir = create_exp_dir(
-            base_dir,
-            config.get('experiment', {}).get('name', 'domain_ada'),
-            config
-        )
-        self.checkpoint_dir = Path(self.exp_dir) / 'checkpoints'
-        self.sample_dir = Path(self.exp_dir) / 'samples'
+        # 直接使用output_dir，不创建时间戳子文件夹
+        self.exp_dir = Path(base_dir)
+        self.exp_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 保存配置文件
+        config_path = self.exp_dir / 'config.yaml'
+        save_config(config, config_path)
+        
+        # 不创建子文件夹，直接在exp_dir保存
+        self.checkpoint_dir = self.exp_dir
+        self.sample_dir = self.exp_dir
+        # 确保目录存在
         self.checkpoint_dir.mkdir(exist_ok=True, parents=True)
         self.sample_dir.mkdir(exist_ok=True, parents=True)
         
@@ -248,6 +253,10 @@ class EpochBasedTrainer:
         with torch.no_grad():
             # 确保只可视化前num_show个样本
             latents = latents[:num_show]
+            
+            # 反归一化：除以scale_factor
+            scale_factor = self.config.get('vae', {}).get('scale_factor', 0.18215)
+            latents = latents / scale_factor
             
             # VAE解码
             if hasattr(self.vae, 'decode'):
@@ -509,24 +518,15 @@ class EpochBasedTrainer:
                 print(f"Deleted old best model: {self.best_model_path}")
             
             # 保存新的最佳模型
-            filepath = self.checkpoint_dir / f'best_{phase}_epoch_{epoch}.pt'
+            filepath = self.checkpoint_dir / f'best_{phase}.pt'  # 简化命名
             torch.save(checkpoint, filepath)
             self.best_model_path = filepath
-            print(f"Saved best model: {filepath}")
+            print(f"✅ Saved best model: {filepath}")
         else:
-            # 普通checkpoint
-            filepath = self.checkpoint_dir / f'{phase}_epoch_{epoch}.pt'
+            # 普通checkpoint - 直接覆盖，只保留最新的
+            filepath = self.checkpoint_dir / f'{phase}_checkpoint.pt'
             torch.save(checkpoint, filepath)
-            
-            # 删除旧的checkpoint（只保留最近3个）
-            if self.config['training'].get('delete_old_checkpoints', True):
-                pattern = f'{phase}_epoch_*.pt'
-                checkpoints = sorted(self.checkpoint_dir.glob(pattern))
-                if len(checkpoints) > 3:
-                    for old_ckpt in checkpoints[:-3]:
-                        if 'best' not in old_ckpt.name:
-                            old_ckpt.unlink()
-                            print(f"Deleted old checkpoint: {old_ckpt}")
+            print(f"💾 Saved checkpoint: {filepath} (epoch {epoch})")
     
     def train_phase(self, phase: str):
         """
