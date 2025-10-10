@@ -309,8 +309,9 @@ def validate(model: DDP,
         
         # Save first batch for visualization (only on rank 0)
         if i == 0 and save_samples and rank == 0:
-            first_batch = batch[:8].cpu()
-            first_recon = recon[:8].cpu()
+            # 转换为float32避免FP16的dtype问题
+            first_batch = batch[:8].cpu().float()
+            first_recon = recon[:8].cpu().float()
             
     n_batches = len(dataloader)
     
@@ -337,7 +338,8 @@ def validate(model: DDP,
             for i in range(n_samples):
                 # 原图
                 ax1 = plt.subplot(2, n_samples, i + 1)
-                img_orig = first_batch[i].permute(1, 2, 0).clamp(0, 1)
+                # 确保转换为float32并移到CPU，避免dtype问题
+                img_orig = first_batch[i].cpu().float().permute(1, 2, 0).clamp(0, 1).numpy()
                 ax1.imshow(img_orig)
                 ax1.axis('off')
                 if i == 0:
@@ -345,7 +347,8 @@ def validate(model: DDP,
                     
                 # 重建图
                 ax2 = plt.subplot(2, n_samples, n_samples + i + 1)
-                img_recon = first_recon[i].permute(1, 2, 0).clamp(0, 1)
+                # 确保转换为float32并移到CPU，避免dtype问题
+                img_recon = first_recon[i].cpu().float().permute(1, 2, 0).clamp(0, 1).numpy()
                 ax2.imshow(img_recon)
                 ax2.axis('off')
                 if i == 0:
@@ -667,13 +670,13 @@ def train_ddp(rank, world_size, args):
                 torch.save(checkpoint, best_path)
                 print(f"✅ Saved new best model (val_loss: {best_val_loss:.4f}): {best_path}")
                 
-                # 保存最佳模型的可视化
+                # 复制当前epoch的可视化作为最佳模型的可视化
+                current_sample_path = os.path.join(args.checkpoint_dir, f'samples_epoch_{epoch}.png')
                 best_sample_path = os.path.join(args.checkpoint_dir, 'best_samples.png')
-                _ = validate(model, val_loader, kl_weight, device, rank,
-                            save_samples=True,
-                            save_path=best_sample_path,
-                            use_fp16=args.use_fp16)
-                print(f"✅ Saved best model visualization: {best_sample_path}")
+                if os.path.exists(current_sample_path):
+                    import shutil
+                    shutil.copy2(current_sample_path, best_sample_path)
+                    print(f"✅ Saved best model visualization: {best_sample_path}")
                 
                 # 重置patience计数器
                 patience_counter = 0
@@ -687,13 +690,20 @@ def train_ddp(rank, world_size, args):
         
         # 确保所有进程同步
         if dist.is_initialized():
+            # 在barrier之前打印状态（仅rank 0）
+            if rank == 0:
+                print(f"  Waiting for all GPUs to complete epoch {epoch}...")
             dist.barrier()
+            if rank == 0:
+                print(f"  All GPUs synchronized, continuing to next epoch\n")
         
         # Check if we should stop (broadcast from rank 0)
         if dist.is_initialized():
             should_stop = torch.tensor([patience_counter >= args.patience], device=device)
             dist.broadcast(should_stop, src=0)
             if should_stop[0]:
+                if rank == 0:
+                    print(f"Early stopping triggered on all GPUs")
                 break
     
     # 训练总结 (only on rank 0)
