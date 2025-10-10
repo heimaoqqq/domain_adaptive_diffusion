@@ -451,8 +451,7 @@ class EpochBasedTrainer:
         with torch.no_grad():
             # 使用EMA模型（如果有）
             if self.ema is not None:
-                self.ema.store()
-                self.ema.copy_to()
+                self.ema.apply_shadow()  # 应用EMA参数
             
             # 生成每个用户的样本
             class_labels = torch.arange(
@@ -472,7 +471,7 @@ class EpochBasedTrainer:
             
             # 恢复原始模型（如果使用EMA）
             if self.ema is not None:
-                self.ema.restore()
+                self.ema.restore()  # 恢复原始参数
             
             # 可视化
             save_path = self.sample_dir / f'{phase}_epoch_{epoch}.png'
