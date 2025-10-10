@@ -66,6 +66,11 @@ training:
   save_best_only: true  # 只保存最佳模型
   patience: 10  # 早停
   
+# 数据配置
+data:
+  image_size: 32  # latent空间大小 (256x256图像 -> 32x32 latent)
+  latent_path: "../data/processed"  # 默认路径，可通过命令行覆盖
+
 # VAE配置
 vae:
   checkpoint: "../vae/checkpoints/kl_vae_best.pt"
