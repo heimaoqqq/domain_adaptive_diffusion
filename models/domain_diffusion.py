@@ -65,9 +65,21 @@ class DomainAdaptiveDiffusion(GaussianDiffusion):
         # 保存loss_type供自定义使用
         self.loss_type = loss_type
         
-        # 保存min_snr参数（父类可能不暴露这些属性）
+        # 保存父类可能不暴露的属性
         self.min_snr_loss_weight = min_snr_loss_weight
         self.min_snr_gamma = min_snr_gamma
+        self.auto_normalize = auto_normalize
+        self.sampling_timesteps = sampling_timesteps or timesteps // 4  # 默认为1/4的时间步
+        self.objective = objective
+        self.offset_noise_strength = offset_noise_strength
+        
+        # 保存必要的属性以供采样使用
+        if torch.cuda.is_available():
+            self.device = 'cuda'
+        else:
+            self.device = 'cpu'
+        self.channels = model.channels if hasattr(model, 'channels') else 4  # VAE latent channels
+        self.image_size = image_size
         
         # 域适应参数
         self.mmd_loss_weight = mmd_loss_weight
@@ -181,7 +193,7 @@ class DomainAdaptiveDiffusion(GaussianDiffusion):
         x = self.q_sample(x_start=x_start, t=t, noise=noise)
         
         # 模型预测
-        if self.self_condition and np.random.random() < 0.5:
+        if hasattr(self, 'self_condition') and self.self_condition and np.random.random() < 0.5:
             with torch.no_grad():
                 x_self_cond = self.model_predictions(x, t).pred_x_start
                 x_self_cond.detach_()
