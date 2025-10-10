@@ -40,6 +40,7 @@ class DomainConditionalUnet(nn.Module):
         super().__init__()
         
         # 基础UNet (来自denoising-diffusion-pytorch)
+        # 注意：denoising-diffusion-pytorch的Unet不支持dropout参数
         self.base_unet = Unet(
             dim=dim,
             init_dim=None,
@@ -53,9 +54,11 @@ class DomainConditionalUnet(nn.Module):
             random_fourier_features=random_fourier_features,
             learned_sinusoidal_dim=learned_sinusoidal_dim,
             attn_dim_head=32,
-            attn_heads=4,
-            dropout=dropout
+            attn_heads=4
         )
+        
+        # 保存dropout值用于其他层（如果需要）
+        self.dropout = dropout
         
         # 时间嵌入维度（从base_unet获取）
         time_dim = dim * 4
