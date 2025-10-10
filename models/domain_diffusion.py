@@ -243,7 +243,21 @@ class DomainAdaptiveDiffusion(GaussianDiffusion):
             if source_mask.any() and target_mask.any():
                 # 预测干净图像用于MMD
                 with torch.no_grad():
-                    pred_x0 = self.predict_start_from_noise(x, t, model_out)
+                    # 根据objective预测x0
+                    if self.objective == 'pred_noise':
+                        # x_t = sqrt(alpha_t) * x_0 + sqrt(1 - alpha_t) * noise
+                        # => x_0 = (x_t - sqrt(1 - alpha_t) * noise) / sqrt(alpha_t)
+                        alpha = self.alphas_cumprod[t][:, None, None, None]
+                        pred_x0 = (x - torch.sqrt(1 - alpha) * model_out) / torch.sqrt(alpha)
+                    elif self.objective == 'pred_x0':
+                        pred_x0 = model_out
+                    elif self.objective == 'pred_v':
+                        alpha = self.alphas_cumprod[t][:, None, None, None]
+                        pred_x0 = torch.sqrt(alpha) * x - torch.sqrt(1 - alpha) * model_out
+                    else:
+                        # 备用：使用GaussianDiffusion的方法
+                        predictions = self.model_predictions(x, t, model_out)
+                        pred_x0 = predictions.pred_x_start
                 
                 # 计算MMD损失
                 mmd_loss = self.compute_mmd_loss(
