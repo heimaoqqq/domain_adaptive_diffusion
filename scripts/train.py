@@ -232,6 +232,47 @@ class EpochBasedTrainer:
             )
             print(f"✅ wandb initialized: {wandb.run.name}")
     
+    def decode_and_visualize_simple(
+        self,
+        latents: torch.Tensor,
+        save_path: str,
+        title: str = "Generated Samples"
+    ):
+        """简化的可视化方法，跳过VAE解码"""
+        print("⚠️ 使用简化可视化（跳过VAE解码）")
+        
+        # 直接将latents可视化为灰度图
+        # 取第一个通道，上采样到合理大小
+        images = latents[:, 0:1, :, :]  # [B, 1, 32, 32]
+        images = torch.nn.functional.interpolate(
+            images, size=(256, 256), mode='bilinear', align_corners=False
+        )
+        
+        # 归一化到[0,1]
+        images = (images - images.min()) / (images.max() - images.min() + 1e-8)
+        
+        # 转换为numpy
+        images = images.cpu().numpy()
+        images = (images * 255).astype(np.uint8)
+        
+        # 创建网格可视化
+        num_show = min(16, len(images))
+        grid_size = int(np.sqrt(num_show))
+        fig, axes = plt.subplots(grid_size, grid_size, figsize=(12, 12))
+        axes = axes.flatten()
+        
+        for i in range(num_show):
+            if i < len(images):
+                axes[i].imshow(images[i, 0], cmap='viridis')
+                axes[i].axis('off')
+        
+        plt.suptitle(title, fontsize=16)
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        print(f"💾 简化可视化保存到: {save_path}")
+    
     def decode_and_visualize(
         self,
         latents: torch.Tensor,
@@ -254,23 +295,37 @@ class EpochBasedTrainer:
             # 确保只可视化前num_show个样本
             latents = latents[:num_show]
             
+            # 调试信息
+            print(f"解码前latent统计: mean={latents.mean():.3f}, std={latents.std():.3f}, range=[{latents.min():.3f}, {latents.max():.3f}]")
+            
             # 使用VAE的decode_latents方法，它会自动处理scale_factor
             if hasattr(self.vae, 'decode_latents'):
                 # KL_VAE的decode_latents方法会自动除以scale_factor
                 images = self.vae.decode_latents(latents)
+                print("使用decode_latents方法")
             else:
                 # 备用方案：手动处理scale_factor
                 scale_factor = self.config.get('vae', {}).get('scale_factor', 0.18215)
-                latents = latents / scale_factor
+                latents_unscaled = latents / scale_factor
+                print(f"手动除以scale_factor={scale_factor}")
+                print(f"Unscaled latent统计: mean={latents_unscaled.mean():.3f}, std={latents_unscaled.std():.3f}")
                 
                 if hasattr(self.vae, 'decode'):
-                    images = self.vae.decode(latents)
+                    images = self.vae.decode(latents_unscaled)
                 else:
-                    images = self.vae.decoder(latents) if hasattr(self.vae, 'decoder') else latents
+                    images = self.vae.decoder(latents_unscaled) if hasattr(self.vae, 'decoder') else latents_unscaled
+            
+            # 打印解码后的范围
+            print(f"解码后图像范围: [{images.min():.3f}, {images.max():.3f}]")
+            
+            # 根据输出范围决定如何处理
+            if images.min() < -0.5:  # 可能是[-1,1]范围
+                print("检测到[-1,1]范围，转换到[0,1]")
+                images = (images + 1.0) / 2.0
             
             # 确保图像在[0, 1]范围内
-            # 注意：VAE训练时输入是[0,1]，所以输出也应该是[0,1]
             images = torch.clamp(images, 0.0, 1.0)
+            print(f"最终图像范围: [{images.min():.3f}, {images.max():.3f}]")
             
             # 转换为numpy
             images = images.cpu().numpy()
@@ -486,11 +541,20 @@ class EpochBasedTrainer:
             
             # 可视化
             save_path = self.sample_dir / f'{phase}_epoch_{epoch}.png'
-            self.decode_and_visualize(
-                samples,
-                str(save_path),
-                title=f'{phase.capitalize()} - Epoch {epoch}'
-            )
+            try:
+                self.decode_and_visualize(
+                    samples,
+                    str(save_path),
+                    title=f'{phase.capitalize()} - Epoch {epoch}'
+                )
+            except Exception as e:
+                print(f"⚠️ VAE解码失败: {e}")
+                print("回退到简化可视化...")
+                self.decode_and_visualize_simple(
+                    samples,
+                    str(save_path),
+                    title=f'{phase.capitalize()} - Epoch {epoch} (Simplified)'
+                )
         
         self.unet.train()
     
