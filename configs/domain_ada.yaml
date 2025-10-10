@@ -172,6 +172,11 @@ experiment:
   tags: ["domain_adaptation", "few_shot", "diffusion"]
   notes: "Domain adaptive diffusion for micro-Doppler spectrograms"
   
+# Data configuration
+data:
+  image_size: 32  # latent space size (256x256 images -> 32x32 latents)
+  latent_path: "../data/processed"  # default path, can be overridden via CLI
+
 # Random seed
 seed: 42
 
