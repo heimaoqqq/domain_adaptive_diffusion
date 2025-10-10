@@ -605,6 +605,12 @@ class EpochBasedTrainer:
         # 获取阶段配置
         phase_config = self.config['training'][phase]
         num_epochs = phase_config.get('epochs', phase_config.get('num_epochs', 20))
+        # 调试：显示实际使用的epoch数
+        if 'epochs' in phase_config:
+            print(f"✓ Using {phase} epochs from config: {phase_config['epochs']}")
+        else:
+            print(f"⚠️ Warning: 'epochs' not found in {phase} config, using default: {num_epochs}")
+            print(f"  Available keys in phase_config: {list(phase_config.keys())}")
         
         # 创建数据加载器
         batch_size = phase_config.get('batch_size', 32)
@@ -762,6 +768,10 @@ def main():
     parser.add_argument('--use-wandb', action='store_true',
                         help='Enable wandb logging (requires wandb package)')
     
+    # 调试选项
+    parser.add_argument('--debug', action='store_true',
+                        help='Debug mode: test basic functions without training')
+    
     # 常用参数的简化版本
     parser.add_argument('--data_dir', type=str, 
                         help='Path to processed latent data (same as --data.latent_path)')
@@ -818,9 +828,9 @@ def main():
                 config['training'][phase]['batch_size'] = args.batch_size
                 
     if args.num_epochs is not None:
-        # 按比例分配到各阶段 (例如: 40% pretrain, 40% align, 20% finetune)
-        pretrain_epochs = int(args.num_epochs * 0.4)
-        align_epochs = int(args.num_epochs * 0.4)
+        # 按比例分配到各阶段 (例如: 50% pretrain, 35% align, 15% finetune)
+        pretrain_epochs = int(args.num_epochs * 0.5)
+        align_epochs = int(args.num_epochs * 0.35)
         finetune_epochs = args.num_epochs - pretrain_epochs - align_epochs
         
         if 'training' not in config:
@@ -870,6 +880,95 @@ def main():
     if args.resume:
         print(f"Resuming from checkpoint: {args.resume}")
         # TODO: 实现恢复逻辑
+    
+    # 调试模式（通过命令行参数 --debug 启用）
+    if getattr(args, 'debug', False):
+        print("\n" + "="*60)
+        print("🔍 进入调试模式...")
+        print("="*60)
+        
+        # 1. 检查DDPM属性
+        print("\n1. DDPM基本属性:")
+        print(f"   - Timesteps: {trainer.diffusion.num_timesteps}")
+        print(f"   - Objective: {trainer.diffusion.objective}")
+        print(f"   - Beta schedule: {trainer.diffusion.beta_schedule}")
+        print(f"   - Auto normalize: {trainer.diffusion.auto_normalize}")
+        
+        # 2. 测试单步训练
+        print("\n2. 测试单步训练...")
+        trainer.unet.train()
+        
+        # 加载一批数据
+        train_loader, _ = create_dataloaders(
+            config['data']['latent_path'],
+            'pretrain',
+            config['training']['pretrain']['batch_size'],
+            num_workers=0,
+            domain_balance_ratio=0.8,
+            device=args.device
+        )
+        
+        batch = next(iter(train_loader))
+        latents = batch['latent'].to(args.device)
+        class_labels = batch['class_label'].to(args.device)
+        domain_labels = batch['domain_label'].to(args.device)
+        
+        print(f"   - Batch形状: {latents.shape}")
+        print(f"   - Latent范围: [{latents.min():.3f}, {latents.max():.3f}]")
+        print(f"   - Latent标准差: {latents.std():.3f}")
+        
+        # 测试损失
+        t = torch.randint(0, trainer.diffusion.num_timesteps, (latents.shape[0],), device=args.device)
+        with torch.no_grad():
+            loss_dict = trainer.diffusion.p_losses_with_details(
+                latents, t,
+                class_labels=class_labels,
+                domain_labels=domain_labels
+            )
+        print(f"   - 损失值: {loss_dict['total_loss'].item():.4f}")
+        
+        # 3. 测试生成
+        print("\n3. 测试快速生成...")
+        trainer.unet.eval()
+        with torch.no_grad():
+            samples = trainer.diffusion.sample(
+                batch_size=4,
+                class_labels=torch.zeros(4, dtype=torch.long).to(args.device),
+                guidance_scale=0.0
+            )
+        
+        print(f"   - 生成形状: {samples.shape}")
+        print(f"   - 生成范围: [{samples.min():.3f}, {samples.max():.3f}]")
+        print(f"   - 生成标准差: {samples.std():.3f}")
+        
+        # 尝试解码一个样本
+        if trainer.vae is not None:
+            print("\n4. 测试VAE解码...")
+            try:
+                with torch.no_grad():
+                    # 只解码第一个样本
+                    sample = samples[:1]
+                    if hasattr(trainer.vae, 'decode_latents'):
+                        decoded = trainer.vae.decode_latents(sample)
+                    else:
+                        scale_factor = config.get('vae', {}).get('scale_factor', 0.18215)
+                        sample_unscaled = sample / scale_factor
+                        decoded = trainer.vae.decode(sample_unscaled)
+                    
+                    print(f"   - 解码形状: {decoded.shape}")
+                    print(f"   - 解码范围: [{decoded.min():.3f}, {decoded.max():.3f}]")
+                    
+                    # 检查是否全黑或全白
+                    if decoded.std() < 0.01:
+                        print("   ⚠️ 解码图像方差很小，可能是全黑或全白！")
+                    
+            except Exception as e:
+                print(f"   ❌ VAE解码失败: {e}")
+        
+        print("\n" + "="*60)
+        print("调试完成！如需正常训练，请移除 --debug 参数")
+        print("="*60)
+        return
     
     # 开始训练
     trainer.train()
