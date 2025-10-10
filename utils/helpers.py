@@ -383,35 +383,46 @@ def move_to_device(
         return data
 
 
-def save_config(config: Dict, save_path: str):
+def save_config(config: Dict, save_path):
     """保存配置文件"""
-    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+    # 转换为Path对象以统一处理
+    save_path = Path(save_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
     
-    if save_path.endswith('.json'):
+    # 获取文件扩展名
+    suffix = save_path.suffix.lower()
+    
+    if suffix == '.json':
         with open(save_path, 'w') as f:
             json.dump(config, f, indent=2)
-    elif save_path.endswith('.yaml') or save_path.endswith('.yml'):
+    elif suffix in ['.yaml', '.yml']:
         with open(save_path, 'w') as f:
             yaml.dump(config, f, default_flow_style=False)
     else:
-        raise ValueError(f"Unsupported config format: {save_path}")
+        raise ValueError(f"Unsupported config format: {suffix}")
     
     print(f"Saved config to {save_path}")
 
 
-def load_config(config_path: str) -> Dict:
+def load_config(config_path) -> Dict:
     """加载配置文件"""
-    if not Path(config_path).exists():
+    # 转换为Path对象以统一处理
+    config_path = Path(config_path)
+    
+    if not config_path.exists():
         raise FileNotFoundError(f"Config not found: {config_path}")
     
-    if config_path.endswith('.json'):
+    # 获取文件扩展名
+    suffix = config_path.suffix.lower()
+    
+    if suffix == '.json':
         with open(config_path, 'r') as f:
             config = json.load(f)
-    elif config_path.endswith('.yaml') or config_path.endswith('.yml'):
+    elif suffix in ['.yaml', '.yml']:
         with open(config_path, 'r') as f:
             config = yaml.safe_load(f)
     else:
-        raise ValueError(f"Unsupported config format: {config_path}")
+        raise ValueError(f"Unsupported config format: {suffix}")
     
     return config
 
