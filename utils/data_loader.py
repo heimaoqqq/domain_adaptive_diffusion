@@ -238,38 +238,83 @@ def load_latents(data_path: str, device: str = 'cpu') -> Dict[str, torch.Tensor]
     
     data = {}
     
-    # 加载源域数据
+    # 尝试新格式文件（prepare_microdoppler_data.py生成的）
+    source_train_path = data_path / 'source_train.pt'
+    source_val_path = data_path / 'source_val.pt'
+    target_fewshot_path = data_path / 'target_fewshot.pt'
+    
+    # 兼容旧格式文件
     source_latents_path = data_path / 'source_latents.pt'
     source_labels_path = data_path / 'source_labels.pt'
     
-    if source_latents_path.exists():
+    # 加载源域数据
+    if source_train_path.exists():
+        # 使用新格式：source_train.pt
+        source_data = torch.load(source_train_path, map_location=device)
+        data['source_latents'] = source_data
+        print(f"Loaded source training data: {data['source_latents'].shape}")
+        
+        # 自动生成labels（31个用户）
+        n_samples = len(source_data)
+        n_users = 31
+        samples_per_user = n_samples // n_users
+        labels = []
+        for i in range(n_users):
+            labels.extend([i] * samples_per_user)
+        # 处理剩余样本
+        for i in range(n_samples - len(labels)):
+            labels.append(i % n_users)
+        data['source_labels'] = torch.tensor(labels, dtype=torch.long, device=device)
+        print(f"Generated source labels: {data['source_labels'].shape}")
+        
+    elif source_latents_path.exists():
+        # 使用旧格式
         data['source_latents'] = torch.load(source_latents_path, map_location=device)
         print(f"Loaded source latents: {data['source_latents'].shape}")
+        
+        if source_labels_path.exists():
+            data['source_labels'] = torch.load(source_labels_path, map_location=device)
+            print(f"Loaded source labels: {data['source_labels'].shape}")
+        else:
+            raise FileNotFoundError(f"Source labels not found: {source_labels_path}")
     else:
-        raise FileNotFoundError(f"Source latents not found: {source_latents_path}")
+        raise FileNotFoundError(f"Source data not found. Looked for: {source_train_path} or {source_latents_path}")
     
-    if source_labels_path.exists():
-        data['source_labels'] = torch.load(source_labels_path, map_location=device)
-        print(f"Loaded source labels: {data['source_labels'].shape}")
+    # 加载目标域数据
+    if target_fewshot_path.exists():
+        # 使用新格式：target_fewshot.pt
+        target_data = torch.load(target_fewshot_path, map_location=device)
+        data['target_latents'] = target_data
+        print(f"Loaded target few-shot data: {data['target_latents'].shape}")
+        
+        # 生成labels（31用户，每用户5张）
+        n_samples = len(target_data)
+        n_users = 31
+        samples_per_user = 5
+        labels = []
+        for i in range(n_users):
+            for j in range(samples_per_user):
+                if len(labels) < n_samples:
+                    labels.append(i)
+        data['target_labels'] = torch.tensor(labels[:n_samples], dtype=torch.long, device=device)
+        print(f"Generated target labels: {data['target_labels'].shape}")
+        
     else:
-        raise FileNotFoundError(f"Source labels not found: {source_labels_path}")
-    
-    # 加载目标域数据（可选）
-    target_latents_path = data_path / 'target_latents.pt'
-    target_labels_path = data_path / 'target_labels.pt'
-    
-    if target_latents_path.exists():
-        data['target_latents'] = torch.load(target_latents_path, map_location=device)
-        print(f"Loaded target latents: {data['target_latents'].shape}")
-    else:
-        print("Warning: Target latents not found, using source domain only")
-        data['target_latents'] = None
-    
-    if target_labels_path.exists():
-        data['target_labels'] = torch.load(target_labels_path, map_location=device)
-        print(f"Loaded target labels: {data['target_labels'].shape}")
-    else:
-        data['target_labels'] = None
+        # 尝试旧格式
+        target_latents_path = data_path / 'target_latents.pt'
+        target_labels_path = data_path / 'target_labels.pt'
+        
+        if target_latents_path.exists():
+            data['target_latents'] = torch.load(target_latents_path, map_location=device)
+            print(f"Loaded target latents: {data['target_latents'].shape}")
+            if target_labels_path.exists():
+                data['target_labels'] = torch.load(target_labels_path, map_location=device)
+            else:
+                data['target_labels'] = None
+        else:
+            print("Warning: Target data not found, using source domain only")
+            data['target_latents'] = None
+            data['target_labels'] = None
     
     # 验证数据
     assert data['source_latents'].dim() == 4, "Latents should be 4D: [N, C, H, W]"
@@ -341,17 +386,33 @@ def create_dataloaders(
             pin_memory=True
         )
     
-    # 创建验证集（使用一小部分目标域数据）
+    # 创建验证集
     val_loader = None
-    if data['target_latents'] is not None and len(data['target_latents']) > 10:
-        # 使用10%的目标域数据作为验证集
-        val_size = max(len(data['target_latents']) // 10, 5)
+    
+    # 尝试加载专门的验证集数据
+    source_val_path = Path(data_path) / 'source_val.pt'
+    if source_val_path.exists():
+        # 使用专门的验证集
+        val_data = torch.load(source_val_path, map_location=device)
+        print(f"Loaded validation data: {val_data.shape}")
+        
+        # 生成验证集labels
+        n_val_samples = len(val_data)
+        n_users = 31
+        val_samples_per_user = n_val_samples // n_users
+        val_labels = []
+        for i in range(n_users):
+            val_labels.extend([i] * val_samples_per_user)
+        for i in range(n_val_samples - len(val_labels)):
+            val_labels.append(i % n_users)
+        val_labels = torch.tensor(val_labels, dtype=torch.long, device=device)
+        
         val_dataset = DomainAdaptiveDataset(
-            source_latents=data['source_latents'][:100],  # 少量源域用于参考
-            source_labels=data['source_labels'][:100],
-            target_latents=data['target_latents'][:val_size],
-            target_labels=data['target_labels'][:val_size],
-            phase='align',
+            source_latents=val_data,
+            source_labels=val_labels,
+            target_latents=data['target_latents'][:10] if data['target_latents'] is not None else None,
+            target_labels=data['target_labels'][:10] if data['target_labels'] is not None else None,
+            phase='align' if data['target_latents'] is not None else 'pretrain',
             augmentation=False
         )
         
