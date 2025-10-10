@@ -199,13 +199,13 @@ class EpochBasedTrainer:
         if optimizer_type == 'adamw':
             self.optimizer = torch.optim.AdamW(
                 self.unet.parameters(),
-                lr=pretrain_config['learning_rate'],
+                lr=float(pretrain_config['learning_rate']),  # 确保转换为float
                 betas=(
-                    self.config['training'].get('beta1', 0.9),
-                    self.config['training'].get('beta2', 0.999)
+                    float(self.config['training'].get('beta1', 0.9)),
+                    float(self.config['training'].get('beta2', 0.999))
                 ),
-                eps=self.config['training'].get('eps', 1e-8),
-                weight_decay=self.config['training'].get('weight_decay', 0.01)
+                eps=float(self.config['training'].get('eps', 1e-8)),
+                weight_decay=float(pretrain_config.get('weight_decay', 0.01))
             )
         else:
             raise ValueError(f"Unknown optimizer: {optimizer_type}")
@@ -322,7 +322,7 @@ class EpochBasedTrainer:
         
         # 设置学习率
         for param_group in self.optimizer.param_groups:
-            param_group['lr'] = lr
+            param_group['lr'] = float(lr)
         
         # 训练循环
         pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{total_epochs}")
@@ -560,7 +560,7 @@ class EpochBasedTrainer:
         
         # 重置优化器学习率
         for param_group in self.optimizer.param_groups:
-            param_group['lr'] = phase_config['learning_rate']
+            param_group['lr'] = float(phase_config['learning_rate'])
         
         # 训练循环
         for epoch in range(num_epochs):
