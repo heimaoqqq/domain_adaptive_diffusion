@@ -266,13 +266,15 @@ def validate(model: DDP,
              rank: int,
              save_samples: bool = False,
              save_path: str = None,
-             use_fp16: bool = False) -> Dict[str, float]:
+             use_fp16: bool = False,
+             perceptual_loss_fn=None) -> Dict[str, float]:
     """Validate model with DDP"""
     model.eval()
     
     total_loss = 0
     total_rec_loss = 0
     total_kl_loss = 0
+    total_perceptual_loss = 0
     
     # For visualization (only on rank 0)
     first_batch = None
@@ -290,22 +292,18 @@ def validate(model: DDP,
         # Forward pass with or without FP16
         if use_fp16:
             with autocast():
-                recon, posterior = model.module(batch)
-                rec_loss = nn.functional.mse_loss(batch, recon)
-                kl_loss = posterior.kl()
-                kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
-                loss = rec_loss + kl_weight * kl_loss
+                losses = model.module.get_loss(batch, kl_weight=kl_weight, perceptual_loss_fn=perceptual_loss_fn)
+                recon, posterior = model.module(batch)  # Need for visualization
         else:
-            recon, posterior = model.module(batch)
-            rec_loss = nn.functional.mse_loss(batch, recon)
-            kl_loss = posterior.kl()
-            kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
-            loss = rec_loss + kl_weight * kl_loss
+            losses = model.module.get_loss(batch, kl_weight=kl_weight, perceptual_loss_fn=perceptual_loss_fn)
+            recon, posterior = model.module(batch)  # Need for visualization
         
         # Record losses
-        total_loss += loss.item()
-        total_rec_loss += rec_loss.item()
-        total_kl_loss += kl_loss.item()
+        total_loss += losses['loss'].item()
+        total_rec_loss += losses['rec_loss'].item()
+        total_kl_loss += losses['kl_loss'].item()
+        if 'perceptual_loss' in losses:
+            total_perceptual_loss += losses['perceptual_loss'].item()
         
         # Save first batch for visualization (only on rank 0)
         if i == 0 and save_samples and rank == 0:
@@ -319,7 +317,8 @@ def validate(model: DDP,
     avg_losses = {
         'loss': all_reduce_mean(torch.tensor(total_loss / n_batches, device=device)).item(),
         'rec_loss': all_reduce_mean(torch.tensor(total_rec_loss / n_batches, device=device)).item(),
-        'kl_loss': all_reduce_mean(torch.tensor(total_kl_loss / n_batches, device=device)).item()
+        'kl_loss': all_reduce_mean(torch.tensor(total_kl_loss / n_batches, device=device)).item(),
+        'perceptual_loss': all_reduce_mean(torch.tensor(total_perceptual_loss / n_batches, device=device)).item() if perceptual_loss_fn else 0.0
     }
     
     # Save reconstructions - only on rank 0
@@ -619,12 +618,17 @@ def train_ddp(rank, world_size, args):
         val_losses = validate(model, val_loader, kl_weight, device, rank,
                             save_samples=(rank == 0),  # Only save on rank 0
                             save_path=sample_path,
-                            use_fp16=args.use_fp16)
+                            use_fp16=args.use_fp16,
+                            perceptual_loss_fn=current_perceptual_fn)
         
         if rank == 0:
             print(f"Val - Loss: {val_losses['loss']:.4f}, "
                   f"Rec: {val_losses['rec_loss']:.4f}, "
-                  f"KL: {val_losses['kl_loss']:.4f}")
+                  f"KL: {val_losses['kl_loss']:.4f}", end='')
+            if val_losses.get('perceptual_loss', 0) > 0:
+                print(f", Perceptual: {val_losses['perceptual_loss']:.4f}")
+            else:
+                print()  # 换行
             
             # 显示epoch时间
             epoch_time = time.time() - epoch_start
@@ -757,7 +761,7 @@ def main():
                        help='Use perceptual loss after warmup')
     parser.add_argument('--perceptual_weight', type=float, default=0.01,
                        help='Weight for perceptual loss')
-    parser.add_argument('--perceptual_start_epoch', type=int, default=10,
+    parser.add_argument('--perceptual_start_epoch', type=int, default=1,
                        help='Epoch to start using perceptual loss')
     parser.add_argument('--patience', type=int, default=20, help='Early stopping patience')
     parser.add_argument('--min_delta', type=float, default=1e-4, 
