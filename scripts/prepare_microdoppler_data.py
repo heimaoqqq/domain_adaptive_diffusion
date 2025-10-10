@@ -89,41 +89,81 @@ def load_classifier(checkpoint_path: str, device: str) -> nn.Module:
     """加载源域分类器"""
     checkpoint = torch.load(checkpoint_path, map_location=device)
     
-    # 尝试从domain_adaptation_experiment导入
-    sys.path.append(str(Path(__file__).parent.parent.parent / 'domain_adaptation_experiment'))
+    # 打印checkpoint内容以帮助调试
+    if isinstance(checkpoint, dict):
+        print(f"Checkpoint包含的键: {list(checkpoint.keys())}")
+    else:
+        print(f"Checkpoint类型: {type(checkpoint)}")
+    
     try:
-        # 根据checkpoint判断模型类型
-        if 'resnet18' in checkpoint_path.lower() or 'improved' in checkpoint_path.lower():
-            # 使用标准ResNet18
-            import torchvision.models as models
-            model = models.resnet18(pretrained=False)
-            num_features = model.fc.in_features
-            
-            # 根据checkpoint获取类别数
-            if 'state_dict' in checkpoint:
+        # 使用标准ResNet18
+        import torchvision.models as models
+        model = models.resnet18(pretrained=False)
+        num_features = model.fc.in_features
+        
+        # 检查checkpoint格式
+        if isinstance(checkpoint, dict):
+            # checkpoint是字典格式
+            if 'model_state_dict' in checkpoint:
+                # 从improved_classifier_training.py保存的格式
+                state_dict = checkpoint['model_state_dict']
+                
+                # 获取类别数
+                if 'num_classes' in checkpoint:
+                    num_classes = checkpoint['num_classes']
+                elif 'args' in checkpoint and 'num_classes' in checkpoint['args']:
+                    num_classes = checkpoint['args']['num_classes']
+                else:
+                    # 从权重推断
+                    fc_weight_key = 'fc.weight'
+                    if fc_weight_key in state_dict:
+                        num_classes = state_dict[fc_weight_key].shape[0]
+                    else:
+                        num_classes = 31  # 默认31个用户
+                        
+                # 修改最后一层
+                model.fc = nn.Linear(num_features, num_classes)
+                
+                # 加载权重
+                model.load_state_dict(state_dict)
+                print(f"成功加载分类器，类别数: {num_classes}")
+                
+            elif 'state_dict' in checkpoint:
+                # 其他可能的格式
                 state_dict = checkpoint['state_dict']
                 # 查找fc层的输出维度
                 fc_weight_key = 'fc.weight' if 'fc.weight' in state_dict else 'module.fc.weight'
                 if fc_weight_key in state_dict:
                     num_classes = state_dict[fc_weight_key].shape[0]
                 else:
-                    num_classes = 31  # 默认31个用户
+                    num_classes = 31
+                    
+                model.fc = nn.Linear(num_features, num_classes)
+                model.load_state_dict(state_dict)
+                
+            else:
+                # checkpoint直接是state_dict
+                # 推断类别数
+                if 'fc.weight' in checkpoint:
+                    num_classes = checkpoint['fc.weight'].shape[0]
+                else:
+                    num_classes = 31
+                    
+                model.fc = nn.Linear(num_features, num_classes)
+                model.load_state_dict(checkpoint)
+        else:
+            # checkpoint直接是state_dict（旧格式）
+            if 'fc.weight' in checkpoint:
+                num_classes = checkpoint['fc.weight'].shape[0]
             else:
                 num_classes = 31
                 
             model.fc = nn.Linear(num_features, num_classes)
-            
-            # 加载权重
-            if 'state_dict' in checkpoint:
-                model.load_state_dict(checkpoint['state_dict'])
-            else:
-                model.load_state_dict(checkpoint)
-        else:
-            raise ValueError("未知的分类器类型")
+            model.load_state_dict(checkpoint)
             
     except Exception as e:
-        print(f"加载分类器失败: {e}")
-        print("将使用随机选择策略")
+        print(f"加载分类器时出错: {e}")
+        print("请检查分类器checkpoint的格式")
         return None
     
     model.to(device)
@@ -339,12 +379,15 @@ def main():
             if classifier is not None:
                 print("✅ 分类器加载成功，使用diversity策略")
             else:
-                print("⚠️ 分类器加载失败，退回到随机选择")
-                args.selection_strategy = 'random'
+                raise RuntimeError(
+                    f"无法加载分类器: {args.classifier_checkpoint}\n"
+                    f"请检查checkpoint格式或使用 --selection_strategy random"
+                )
         else:
-            print(f"⚠️ 分类器文件不存在: {args.classifier_checkpoint}")
-            print("退回到随机选择策略")
-            args.selection_strategy = 'random'
+            raise FileNotFoundError(
+                f"分类器文件不存在: {args.classifier_checkpoint}\n"
+                f"请确保文件路径正确或使用 --selection_strategy random"
+            )
     
     # 划分数据
     source_train, source_val = split_data(source_data, args.train_ratio)
