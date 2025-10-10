@@ -19,7 +19,13 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 from PIL import Image
 import matplotlib.pyplot as plt
-import wandb
+# wandb是可选的，默认不使用
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+    print("⚠️ wandb not installed, logging will be local only")
 
 # 添加项目路径
 sys.path.append(str(Path(__file__).parent.parent))
@@ -98,9 +104,13 @@ class EpochBasedTrainer:
             'mmd_loss': []
         }
         
-        # 初始化wandb（可选）
-        if config.get('logging', {}).get('use_wandb', False):
+        # 初始化wandb（可选，默认不使用）
+        self.use_wandb = config.get('logging', {}).get('use_wandb', False) and WANDB_AVAILABLE
+        if self.use_wandb:
             self._init_wandb()
+        else:
+            if config.get('logging', {}).get('use_wandb', False) and not WANDB_AVAILABLE:
+                print("⚠️ wandb requested but not available, continuing without it")
     
     def _init_models(self):
         """初始化模型"""
@@ -198,13 +208,15 @@ class EpochBasedTrainer:
     
     def _init_wandb(self):
         """初始化wandb"""
-        wandb.init(
-            project=self.config['logging'].get('wandb_project', 'domain-adaptive-diffusion'),
-            entity=self.config['logging'].get('wandb_entity'),
-            name=self.config['experiment'].get('name', 'domain_ada'),
-            config=self.config,
-            tags=self.config['experiment'].get('tags', [])
-        )
+        if WANDB_AVAILABLE:
+            wandb.init(
+                project=self.config['logging'].get('wandb_project', 'domain-adaptive-diffusion'),
+                entity=self.config['logging'].get('wandb_entity'),
+                name=self.config['experiment'].get('name', 'domain_ada'),
+                config=self.config,
+                tags=self.config['experiment'].get('tags', [])
+            )
+            print(f"✅ wandb initialized: {wandb.run.name}")
     
     def decode_and_visualize(
         self,
@@ -668,6 +680,12 @@ def main():
         help='Path to checkpoint to resume from'
     )
     
+    # 日志选项
+    parser.add_argument('--no-wandb', action='store_true', 
+                        help='Disable wandb even if configured (default: wandb is disabled)')
+    parser.add_argument('--use-wandb', action='store_true',
+                        help='Enable wandb logging (requires wandb package)')
+    
     # 覆盖配置的参数
     parser.add_argument('--data.latent_path', type=str, help='Override data path')
     parser.add_argument('--experiment.name', type=str, help='Override experiment name')
@@ -679,6 +697,21 @@ def main():
     
     # 加载配置
     config = load_config(args.config)
+    
+    # 处理wandb设置
+    if args.no_wandb:
+        if 'logging' not in config:
+            config['logging'] = {}
+        config['logging']['use_wandb'] = False
+    elif args.use_wandb:
+        if 'logging' not in config:
+            config['logging'] = {}
+        config['logging']['use_wandb'] = True
+        if not WANDB_AVAILABLE:
+            print("❌ Error: wandb requested but not installed!")
+            print("   Please install with: pip install wandb")
+            import sys
+            sys.exit(1)
     
     # 应用命令行覆盖
     for key, value in vars(args).items():
