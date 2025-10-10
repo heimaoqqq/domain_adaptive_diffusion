@@ -249,8 +249,8 @@ def load_latents(data_path: str, device: str = 'cpu') -> Dict[str, torch.Tensor]
     
     # 加载源域数据
     if source_train_path.exists():
-        # 使用新格式：source_train.pt
-        source_data = torch.load(source_train_path, map_location=device)
+        # 使用新格式：source_train.pt - 加载到CPU
+        source_data = torch.load(source_train_path, map_location='cpu')
         
         # 检查是否为字典格式（包含latents和labels）
         if isinstance(source_data, dict) and 'latents' in source_data:
@@ -260,6 +260,10 @@ def load_latents(data_path: str, device: str = 'cpu') -> Dict[str, torch.Tensor]
             # 纯张量格式
             data['source_latents'] = source_data
             data['source_labels'] = None
+        
+        # 确保latents在CPU上
+        if hasattr(data['source_latents'], 'is_cuda') and data['source_latents'].is_cuda:
+            data['source_latents'] = data['source_latents'].cpu()
             
         print(f"Loaded source training data: {data['source_latents'].shape}")
         
@@ -274,18 +278,21 @@ def load_latents(data_path: str, device: str = 'cpu') -> Dict[str, torch.Tensor]
             # 处理剩余样本
             for i in range(n_samples - len(labels)):
                 labels.append(i % n_users)
-            data['source_labels'] = torch.tensor(labels, dtype=torch.long, device=device)
+            data['source_labels'] = torch.tensor(labels, dtype=torch.long)  # 不指定device，保持在CPU
             print(f"Generated source labels: {data['source_labels'].shape}")
         else:
+            # 确保labels也在CPU上
+            if data['source_labels'].is_cuda:
+                data['source_labels'] = data['source_labels'].cpu()
             print(f"Loaded source labels: {data['source_labels'].shape}")
         
     elif source_latents_path.exists():
-        # 使用旧格式
-        data['source_latents'] = torch.load(source_latents_path, map_location=device)
+        # 使用旧格式 - 加载到CPU
+        data['source_latents'] = torch.load(source_latents_path, map_location='cpu')
         print(f"Loaded source latents: {data['source_latents'].shape}")
         
         if source_labels_path.exists():
-            data['source_labels'] = torch.load(source_labels_path, map_location=device)
+            data['source_labels'] = torch.load(source_labels_path, map_location='cpu')
             print(f"Loaded source labels: {data['source_labels'].shape}")
         else:
             raise FileNotFoundError(f"Source labels not found: {source_labels_path}")
@@ -294,8 +301,8 @@ def load_latents(data_path: str, device: str = 'cpu') -> Dict[str, torch.Tensor]
     
     # 加载目标域数据
     if target_fewshot_path.exists():
-        # 使用新格式：target_fewshot.pt
-        target_data = torch.load(target_fewshot_path, map_location=device)
+        # 使用新格式：target_fewshot.pt - 加载到CPU
+        target_data = torch.load(target_fewshot_path, map_location='cpu')
         
         # 检查是否为字典格式
         if isinstance(target_data, dict) and 'latents' in target_data:
@@ -304,6 +311,10 @@ def load_latents(data_path: str, device: str = 'cpu') -> Dict[str, torch.Tensor]
         else:
             data['target_latents'] = target_data
             data['target_labels'] = None
+        
+        # 确保latents在CPU上
+        if hasattr(data['target_latents'], 'is_cuda') and data['target_latents'].is_cuda:
+            data['target_latents'] = data['target_latents'].cpu()
             
         print(f"Loaded target few-shot data: {data['target_latents'].shape}")
         
@@ -317,9 +328,12 @@ def load_latents(data_path: str, device: str = 'cpu') -> Dict[str, torch.Tensor]
                 for j in range(samples_per_user):
                     if len(labels) < n_samples:
                         labels.append(i)
-            data['target_labels'] = torch.tensor(labels[:n_samples], dtype=torch.long, device=device)
+            data['target_labels'] = torch.tensor(labels[:n_samples], dtype=torch.long)  # 保持在CPU
             print(f"Generated target labels: {data['target_labels'].shape}")
         else:
+            # 确保labels也在CPU上
+            if data['target_labels'].is_cuda:
+                data['target_labels'] = data['target_labels'].cpu()
             print(f"Loaded target labels: {data['target_labels'].shape}")
         
     else:
@@ -328,10 +342,10 @@ def load_latents(data_path: str, device: str = 'cpu') -> Dict[str, torch.Tensor]
         target_labels_path = data_path / 'target_labels.pt'
         
         if target_latents_path.exists():
-            data['target_latents'] = torch.load(target_latents_path, map_location=device)
+            data['target_latents'] = torch.load(target_latents_path, map_location='cpu')
             print(f"Loaded target latents: {data['target_latents'].shape}")
             if target_labels_path.exists():
-                data['target_labels'] = torch.load(target_labels_path, map_location=device)
+                data['target_labels'] = torch.load(target_labels_path, map_location='cpu')
             else:
                 data['target_labels'] = None
         else:
@@ -415,8 +429,8 @@ def create_dataloaders(
     # 尝试加载专门的验证集数据
     source_val_path = Path(data_path) / 'source_val.pt'
     if source_val_path.exists():
-        # 使用专门的验证集
-        val_data_raw = torch.load(source_val_path, map_location=device)
+        # 使用专门的验证集 - 加载到CPU
+        val_data_raw = torch.load(source_val_path, map_location='cpu')
         
         # 检查格式
         if isinstance(val_data_raw, dict) and 'latents' in val_data_raw:
@@ -435,7 +449,7 @@ def create_dataloaders(
             val_labels.extend([i] * val_samples_per_user)
         for i in range(n_val_samples - len(val_labels)):
             val_labels.append(i % n_users)
-        val_labels = torch.tensor(val_labels, dtype=torch.long, device=device)
+        val_labels = torch.tensor(val_labels, dtype=torch.long)  # 保持在CPU
         
         val_dataset = DomainAdaptiveDataset(
             source_latents=val_data,
