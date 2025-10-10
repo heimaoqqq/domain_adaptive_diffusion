@@ -755,7 +755,7 @@ def main():
     # Perceptual loss settings
     parser.add_argument('--use_perceptual', action='store_true', 
                        help='Use perceptual loss after warmup')
-    parser.add_argument('--perceptual_weight', type=float, default=0.05,
+    parser.add_argument('--perceptual_weight', type=float, default=0.01,
                        help='Weight for perceptual loss')
     parser.add_argument('--perceptual_start_epoch', type=int, default=10,
                        help='Epoch to start using perceptual loss')
