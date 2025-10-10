@@ -74,10 +74,7 @@ class DomainAdaptiveDiffusion(GaussianDiffusion):
         self.offset_noise_strength = offset_noise_strength
         
         # 保存必要的属性以供采样使用
-        if torch.cuda.is_available():
-            self.device = 'cuda'
-        else:
-            self.device = 'cpu'
+        # device由父类管理，不需要设置
         self.channels = model.channels if hasattr(model, 'channels') else 4  # VAE latent channels
         self.image_size = image_size
         
