@@ -24,6 +24,9 @@ import numpy as np
 import warnings
 warnings.filterwarnings('ignore')
 
+# 混合精度训练
+from torch.cuda.amp import autocast, GradScaler
+
 # DDP imports
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -165,7 +168,9 @@ def train_epoch(model: DDP,
                 rank: int,
                 perceptual_loss_fn=None,
                 gradient_accumulation_steps: int = 1,
-                epoch: int = 0) -> Dict[str, float]:
+                epoch: int = 0,
+                use_fp16: bool = False,
+                scaler=None) -> Dict[str, float]:
     """Train for one epoch with DDP"""
     model.train()
     
@@ -190,22 +195,34 @@ def train_epoch(model: DDP,
     for i, batch in enumerate(progress_bar):
         batch = batch.to(device)
         
-        # Compute loss
-        losses = model.module.get_loss(batch, kl_weight=kl_weight, perceptual_loss_fn=perceptual_loss_fn)
-        loss = losses['loss']
-        
-        # Scale loss by gradient accumulation steps
-        loss = loss / gradient_accumulation_steps
-        
-        # Backward
-        loss.backward()
+        # Compute loss with or without FP16
+        if use_fp16 and scaler is not None:
+            with autocast():
+                losses = model.module.get_loss(batch, kl_weight=kl_weight, perceptual_loss_fn=perceptual_loss_fn)
+                loss = losses['loss'] / gradient_accumulation_steps
+            
+            # Backward with scaled gradients
+            scaler.scale(loss).backward()
+        else:
+            # Standard FP32 training
+            losses = model.module.get_loss(batch, kl_weight=kl_weight, perceptual_loss_fn=perceptual_loss_fn)
+            loss = losses['loss'] / gradient_accumulation_steps
+            loss.backward()
         
         # Update weights every gradient_accumulation_steps
         if (i + 1) % gradient_accumulation_steps == 0:
-            # Gradient clipping for stability
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            if use_fp16 and scaler is not None:
+                # Unscale gradients and clip
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                # Step with scaler
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                # Standard update
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
             
-            optimizer.step()
             optimizer.zero_grad()
         
         # Record losses (记录原始loss，不是缩放后的)
@@ -248,7 +265,8 @@ def validate(model: DDP,
              device: torch.device,
              rank: int,
              save_samples: bool = False,
-             save_path: str = None) -> Dict[str, float]:
+             save_path: str = None,
+             use_fp16: bool = False) -> Dict[str, float]:
     """Validate model with DDP"""
     model.eval()
     
@@ -269,14 +287,20 @@ def validate(model: DDP,
     for i, batch in enumerate(progress_bar):
         batch = batch.to(device)
         
-        # Forward pass
-        recon, posterior = model.module(batch)
-        
-        # Compute losses
-        rec_loss = nn.functional.mse_loss(batch, recon)
-        kl_loss = posterior.kl()
-        kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
-        loss = rec_loss + kl_weight * kl_loss
+        # Forward pass with or without FP16
+        if use_fp16:
+            with autocast():
+                recon, posterior = model.module(batch)
+                rec_loss = nn.functional.mse_loss(batch, recon)
+                kl_loss = posterior.kl()
+                kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
+                loss = rec_loss + kl_weight * kl_loss
+        else:
+            recon, posterior = model.module(batch)
+            rec_loss = nn.functional.mse_loss(batch, recon)
+            kl_loss = posterior.kl()
+            kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
+            loss = rec_loss + kl_weight * kl_loss
         
         # Record losses
         total_loss += loss.item()
@@ -367,10 +391,13 @@ def train_ddp(rank, world_size, args):
         os.makedirs(args.checkpoint_dir, exist_ok=True)
         print(f"Checkpoint directory: {args.checkpoint_dir}")
     
-    # Data transforms
+    # Data transforms - 可以考虑降低分辨率以节省显存
+    img_size = args.img_size  # 默认256，可以改为128或192节省显存
+    if rank == 0 and img_size != 256:
+        print(f"Using reduced image size: {img_size}x{img_size}")
     transform = transforms.Compose([
-        transforms.Resize(256),
-        transforms.CenterCrop(256),
+        transforms.Resize(img_size),
+        transforms.CenterCrop(img_size),
         transforms.ToTensor(),
     ])
     
@@ -515,6 +542,15 @@ def train_ddp(rank, world_size, args):
                 print(f"  - 将在第 {args.perceptual_start_epoch} epoch后启用")
                 print(f"  - 感知损失权重: {args.perceptual_weight}")
     
+    # Setup FP16 if requested
+    scaler = None
+    if args.use_fp16:
+        scaler = GradScaler()
+        if rank == 0:
+            print("\n✅ Using FP16 mixed precision training")
+            print("   Expected memory savings: ~40-50%")
+            print("   Expected batch size increase: 1.5-2x")
+    
     # Training
     best_val_loss = float('inf')
     patience_counter = 0
@@ -522,9 +558,13 @@ def train_ddp(rank, world_size, args):
     if rank == 0:
         print(f"\n训练配置:")
         print(f"  Epochs: {args.epochs}")
-        print(f"  Batch size: {args.batch_size * world_size} (per GPU: {args.batch_size})")
+        print(f"  Per GPU batch size: {args.batch_size}")
+        print(f"  Total batch size: {args.batch_size * world_size}")
         print(f"  Learning rate: {effective_lr:.2e}")
         print(f"  GPUs: {world_size}")
+        print(f"  Batches per GPU per epoch: {len(train_loader)}")
+        if args.use_fp16:
+            print(f"  Mixed Precision: FP16 enabled")
     
     for epoch in range(start_epoch, args.epochs):
         # Set epoch for distributed sampler (important!)
@@ -557,7 +597,7 @@ def train_ddp(rank, world_size, args):
         # Train
         train_losses = train_epoch(model, train_loader, optimizer, kl_weight, device, rank, 
                                   current_perceptual_fn, gradient_accumulation_steps=args.gradient_accumulation_steps,
-                                  epoch=epoch)
+                                  epoch=epoch, use_fp16=args.use_fp16, scaler=scaler)
         
         if rank == 0:
             print(f"Train - Loss: {train_losses['loss']:.4f}, "
@@ -575,7 +615,8 @@ def train_ddp(rank, world_size, args):
         
         val_losses = validate(model, val_loader, kl_weight, device, rank,
                             save_samples=(rank == 0),  # Only save on rank 0
-                            save_path=sample_path)
+                            save_path=sample_path,
+                            use_fp16=args.use_fp16)
         
         if rank == 0:
             print(f"Val - Loss: {val_losses['loss']:.4f}, "
@@ -630,7 +671,8 @@ def train_ddp(rank, world_size, args):
                 best_sample_path = os.path.join(args.checkpoint_dir, 'best_samples.png')
                 _ = validate(model, val_loader, kl_weight, device, rank,
                             save_samples=True,
-                            save_path=best_sample_path)
+                            save_path=best_sample_path,
+                            use_fp16=args.use_fp16)
                 print(f"✅ Saved best model visualization: {best_sample_path}")
                 
                 # 重置patience计数器
@@ -689,12 +731,16 @@ def main():
     parser.add_argument('--ch', type=int, default=128)
     parser.add_argument('--ch_mult', type=int, nargs='+', default=[1, 2, 2, 4])
     parser.add_argument('--scale_factor', type=float, default=0.18215)
+    parser.add_argument('--img_size', type=int, default=256, 
+                       help='Image size (reduce to save memory)')
     
     # Training
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--lr', type=float, default=4.5e-6)  # SD's learning rate
     parser.add_argument('--kl_weight', type=float, default=1e-6)  # Very small KL weight
     parser.add_argument('--warmup_epochs', type=int, default=5)
+    parser.add_argument('--use_fp16', action='store_true',
+                       help='Use FP16 mixed precision training (saves ~50% memory)')
     
     # Perceptual loss settings
     parser.add_argument('--use_perceptual', action='store_true', 
