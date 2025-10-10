@@ -60,6 +60,12 @@ class DomainConditionalUnet(nn.Module):
         # 保存dropout值用于其他层（如果需要）
         self.dropout = dropout
         
+        # 暴露base_unet的属性给GaussianDiffusion
+        # 这些属性是GaussianDiffusion所需的
+        self.random_or_learned_sinusoidal_cond = getattr(self.base_unet, 'random_or_learned_sinusoidal_cond', False)
+        self.self_condition = self_condition
+        self.channels = channels
+        
         # 时间嵌入维度（从base_unet获取）
         time_dim = dim * 4
         
@@ -81,6 +87,16 @@ class DomainConditionalUnet(nn.Module):
         self.use_cross_attention = False
         if self.use_cross_attention:
             self.cross_attn = CrossAttention(dim, dim * 2)
+    
+    def __getattr__(self, name):
+        """代理到base_unet的属性访问，用于兼容GaussianDiffusion"""
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            # 如果当前类没有这个属性，尝试从base_unet获取
+            if hasattr(self.base_unet, name):
+                return getattr(self.base_unet, name)
+            raise
             
     def forward(
         self,
