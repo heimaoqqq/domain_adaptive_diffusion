@@ -112,18 +112,29 @@ class MicroDopplerDataset(Dataset):
 
 def setup_ddp(rank, world_size):
     """Setup DDP environment"""
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12355'
+    # 如果已经由torchrun设置了环境变量，不要覆盖
+    if 'MASTER_ADDR' not in os.environ:
+        # 对Kaggle环境使用127.0.0.1而不是localhost
+        os.environ['MASTER_ADDR'] = '127.0.0.1'
+    if 'MASTER_PORT' not in os.environ:
+        # 使用不同的端口避免冲突
+        os.environ['MASTER_PORT'] = '29500'
     
     # Initialize process group
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
-    
-    # Set device
-    torch.cuda.set_device(rank)
-    
-    # 验证设置
-    if rank == 0:
-        print(f"DDP initialized: Rank {rank}/{world_size}, Device: cuda:{rank}")
+    try:
+        dist.init_process_group("nccl", rank=rank, world_size=world_size)
+        # Set device
+        torch.cuda.set_device(rank)
+        
+        # 验证设置
+        if rank == 0:
+            print(f"DDP initialized: Rank {rank}/{world_size}, Device: cuda:{rank}")
+    except Exception as e:
+        print(f"Error initializing DDP: {e}")
+        # 尝试使用gloo作为后备
+        print("Trying gloo backend...")
+        dist.init_process_group("gloo", rank=rank, world_size=world_size)
+        torch.cuda.set_device(rank)
 
 
 def cleanup_ddp():
@@ -710,16 +721,26 @@ def main():
     
     args = parser.parse_args()
     
-    # 检查是否由torchrun启动
-    if args.local_rank != -1:
+    # 检查是否由torchrun启动（通过环境变量检测）
+    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
         # torchrun启动模式
         print("Detected torchrun launch")
-        # torchrun会自动设置RANK, WORLD_SIZE等环境变量
-        rank = int(os.environ.get('RANK', 0))
-        world_size = int(os.environ.get('WORLD_SIZE', 1))
+        rank = int(os.environ['RANK'])
+        world_size = int(os.environ['WORLD_SIZE'])
         local_rank = int(os.environ.get('LOCAL_RANK', 0))
         
         print(f"Rank: {rank}, World Size: {world_size}, Local Rank: {local_rank}")
+        args.world_size = world_size
+        
+        # 直接调用train_ddp
+        train_ddp(rank, world_size, args)
+    elif args.local_rank != -1:
+        # 旧版本torchrun兼容
+        print("Detected legacy torchrun launch")
+        rank = int(os.environ.get('RANK', 0))
+        world_size = int(os.environ.get('WORLD_SIZE', 1))
+        
+        print(f"Rank: {rank}, World Size: {world_size}")
         args.world_size = world_size
         
         # 直接调用train_ddp
