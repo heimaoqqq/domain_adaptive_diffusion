@@ -157,6 +157,7 @@ class EpochBasedTrainer:
             ddim_sampling_eta=diffusion_config.get('ddim_sampling_eta', 0.0),
             auto_normalize=diffusion_config.get('auto_normalize', True),
             offset_noise_strength=diffusion_config.get('offset_noise_strength', 0.0),
+            scale_factor=diffusion_config.get('scale_factor', 0.18215),  # VAE scale_factor
             min_snr_loss_weight=diffusion_config.get('min_snr_loss_weight', False),
             min_snr_gamma=diffusion_config.get('min_snr_gamma', 5)
         ).to(self.device)
@@ -318,12 +319,8 @@ class EpochBasedTrainer:
             # 打印解码后的范围
             print(f"解码后图像范围: [{images.min():.3f}, {images.max():.3f}]")
             
-            # 根据输出范围决定如何处理
-            if images.min() < -0.5:  # 可能是[-1,1]范围
-                print("检测到[-1,1]范围，转换到[0,1]")
-                images = (images + 1.0) / 2.0
-            
-            # 确保图像在[0, 1]范围内
+            # KL-VAE的decoder输出无界，但训练时学习输出[0,1]范围
+            # 直接clamp到[0,1]即可
             images = torch.clamp(images, 0.0, 1.0)
             print(f"最终图像范围: [{images.min():.3f}, {images.max():.3f}]")
             
