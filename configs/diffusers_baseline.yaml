@@ -24,11 +24,11 @@ model:
   layers_per_block: 3  # 增加层数
   attention_head_dim: 16  # 增大注意力头维度
   # 条件配置 - 使用更强的条件机制
-  num_class_embeds: 31
+  num_class_embeds: 32  # 31个真实类别(0-30) + 1个null class(31)
   class_embed_type: "timestep"  # 使用timestep风格的嵌入，更强大
   class_embeddings_concat: false  # timestep类型不需要concat
-  # 添加cross attention支持
-  cross_attention_dim: 128  # 条件嵌入维度
+  # 不使用cross attention（因为使用timestep风格的条件编码）
+  # cross_attention_dim: null
   # 归一化
   norm_num_groups: 32  # 增加归一化组数
   norm_eps: 1e-6
