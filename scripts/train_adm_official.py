@@ -833,6 +833,11 @@ class OfficialADMTrainer:
         """训练循环"""
         num_epochs = int(self.config['training'].get('num_epochs', self.config['training'].get('epochs', 100)))
         
+        # 获取可视化配置
+        viz_config = self.config.get('visualization', {})
+        viz_interval = viz_config.get('visualization_interval', 1)
+        save_every_epoch = viz_config.get('save_every_epoch', True)
+        
         for epoch in range(num_epochs):
             # 训练
             train_loss = AverageMeter()
@@ -843,9 +848,10 @@ class OfficialADMTrainer:
                 train_loss.update(loss)
                 pbar.set_postfix({'loss': f'{train_loss.avg:.4f}'})
             
-            # 每个epoch生成条件图像
-            print(f"\n📸 生成条件扩散图像...")
-            self.generate_and_visualize(epoch)
+            # 根据配置决定是否生成图像
+            if save_every_epoch or (epoch % viz_interval == 0):
+                print(f"\n📸 生成条件扩散图像...")
+                self.generate_and_visualize(epoch)
             
             # 验证和保存
             if (epoch + 1) % 5 == 0:
@@ -880,7 +886,7 @@ class OfficialADMTrainer:
         print(f"生成样本统计: mean={images.mean():.3f}, std={images.std():.3f}")
     
     @torch.no_grad()
-    def generate_and_visualize(self, epoch, num_samples=16):
+    def generate_and_visualize(self, epoch):
         """
         生成并可视化条件扩散图像
         每个epoch结束时调用
@@ -890,13 +896,14 @@ class OfficialADMTrainer:
         # 使用EMA模型（如果有）
         model = self.ema_model if self.ema_model is not None else self.model
         
-        # 生成每个用户的样本
-        samples_per_user = max(1, num_samples // 31)
+        # 获取可视化配置
+        viz_config = self.config.get('visualization', {})
+        samples_per_user = viz_config.get('num_samples_per_user', 1)
+        num_users_to_show = viz_config.get('num_users_to_show', 8)
+        num_users_to_show = min(num_users_to_show, 31)  # 限制最大用户数
+        
         all_samples = []
         all_labels = []
-        
-        # 为前8个用户生成样本（可视化限制）
-        num_users_to_show = min(8, 31)
         
         # FP16推理
         with autocast(enabled=self.use_fp16):
@@ -925,23 +932,47 @@ class OfficialADMTrainer:
         images = self.vae.decode(all_samples.float())  # [N, 3, 256, 256]
         
         # 创建网格可视化
-        self._save_image_grid(images, all_labels, epoch)
+        self._save_image_grid(images, all_labels, epoch, samples_per_user)
     
-    def _save_image_grid(self, images, labels, epoch):
+    def _save_image_grid(self, images, labels, epoch, samples_per_user=1):
         """
         保存图像网格
         """
         import torchvision
         import matplotlib.pyplot as plt
+        import numpy as np
         
-        # 确保图像在[0, 1]范围
-        images = torch.clamp((images + 1) / 2, 0, 1)
+        # 获取可视化配置
+        viz_config = self.config.get('visualization', {})
+        grid_rows = viz_config.get('grid_rows', 4)
+        
+        # 打印图像统计信息用于调试
+        print(f"  图像统计(解码后): mean={images.mean():.3f}, std={images.std():.3f}")
+        print(f"  范围: [{images.min():.3f}, {images.max():.3f}]")
+        
+        # 智能判断VAE输出范围并归一化
+        img_mean = images.mean().item()
+        img_min = images.min().item()
+        img_max = images.max().item()
+        
+        if img_min >= -0.1 and img_max <= 1.1:
+            # VAE输出已经接近[0, 1]范围，直接clamp
+            print("  检测到VAE输出在[0, 1]范围，直接clamp")
+            images = torch.clamp(images, 0, 1)
+        elif img_min >= -1.1 and img_max <= 1.1 and img_mean < 0.2:
+            # VAE输出在[-1, 1]范围
+            print("  检测到VAE输出在[-1, 1]范围，归一化到[0, 1]")
+            images = torch.clamp((images + 1) / 2, 0, 1)
+        else:
+            # 其他情况，使用标准归一化
+            print(f"  使用标准归一化 (min-max)")
+            images = (images - images.min()) / (images.max() - images.min() + 1e-8)
         
         # 创建图像网格
-        n_images = min(16, images.shape[0])  # 最多显示16张
+        n_images = images.shape[0]  # 使用所有生成的图像
         grid = torchvision.utils.make_grid(
-            images[:n_images], 
-            nrow=4, 
+            images, 
+            nrow=grid_rows,  # 使用配置的行数
             padding=2, 
             normalize=False
         )
@@ -955,15 +986,10 @@ class OfficialADMTrainer:
         ax.axis('off')
         
         # 添加标题
-        user_ids = labels[:n_images].cpu().numpy()
+        user_ids = labels.cpu().numpy()
         title = f"Epoch {epoch} - Conditional Generation\n"
-        title += f"Users: {user_ids[:4].tolist()} (row 1)\n"
-        if n_images > 4:
-            title += f"Users: {user_ids[4:8].tolist()} (row 2)\n"
-        if n_images > 8:
-            title += f"Users: {user_ids[8:12].tolist()} (row 3)\n"
-        if n_images > 12:
-            title += f"Users: {user_ids[12:16].tolist()} (row 4)"
+        title += f"Generated {n_images} samples ({samples_per_user} per user)\n"
+        title += f"User IDs: {np.unique(user_ids).tolist()}"
         
         ax.set_title(title, fontsize=12)
         
