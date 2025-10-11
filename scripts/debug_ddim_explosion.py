@@ -88,7 +88,7 @@ def debug_ddim_explosion():
         with torch.no_grad():
             for i, t in enumerate(scheduler.timesteps[:10]):  # 只看前10步
                 # 扩展时间步
-                timestep = t.expand(x_t.shape[0])
+                timestep = t.expand(x_t.shape[0]).to(device)
                 
                 # 预测噪声（使用真实UNet）
                 noise_pred = unet(x_t, timestep, class_labels=label, 
@@ -129,7 +129,7 @@ def debug_ddim_explosion():
         
         with torch.no_grad():
             for i, t in enumerate(scheduler.timesteps[:5]):
-                timestep = t.expand(x_t.shape[0])
+                timestep = t.expand(x_t.shape[0]).to(device)
                 noise_pred = unet(x_t, timestep, class_labels=label, 
                                 encoder_hidden_states=dummy_encoder_hidden_states,
                                 return_dict=False)[0]
