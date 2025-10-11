@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 from tqdm import tqdm
 import time
+from datetime import datetime
 from typing import Dict, Optional, Tuple, List
 import numpy as np
 from PIL import Image
@@ -62,6 +63,23 @@ class SimpleDiffusionTrainer:
         save_config(config, self.exp_dir / 'config.yaml')
         print(f"✅ 配置已保存到: {self.exp_dir / 'config.yaml'}")
         
+        # 初始化调试记录器
+        self.debug_metrics = {
+            'train_losses': [],      # 每步的损失
+            'val_losses': [],        # 验证损失
+            'grad_norms': [],        # 梯度范数
+            'noise_pred_stats': [],  # 噪声预测统计
+            'condition_response': [], # 条件响应强度
+            'class_diversity': [],   # 类别多样性
+            'timestep_losses': {},   # 按时间步的损失
+        }
+        
+        # 创建日志文件
+        self.log_file = self.exp_dir / 'debug_log.txt'
+        with open(self.log_file, 'w') as f:
+            f.write(f"Training Debug Log - {datetime.now()}\n")
+            f.write("="*60 + "\n")
+        
         # 初始化组件
         self._init_vae()
         self._init_model()
@@ -69,7 +87,15 @@ class SimpleDiffusionTrainer:
         self._init_ema()
         
         print(f"✅ 初始化完成，实验目录: {self.exp_dir}")
-        
+    
+    def _log_debug(self, message):
+        """写入调试日志"""
+        timestamp = datetime.now().strftime('%H:%M:%S')
+        log_message = f"[{timestamp}] {message}"
+        print(log_message)
+        with open(self.log_file, 'a') as f:
+            f.write(log_message + "\n")
+    
     def _init_vae(self):
         """加载预训练的VAE（用于可视化）"""
         vae_checkpoint = self.config.get('vae_checkpoint', None)
@@ -179,7 +205,7 @@ class SimpleDiffusionTrainer:
             block_out_channels=tuple(model_config.get('block_out_channels', [128, 256, 512, 512])),
             layers_per_block=model_config.get('layers_per_block', 3),
             attention_head_dim=model_config.get('attention_head_dim', 16),
-            # 条件配置 - timestep风格的类别嵌入
+            # 条件配置 - timestep风格的类别嵌入（经典方法）
             num_class_embeds=model_config.get('num_class_embeds', 32),
             class_embed_type=model_config.get('class_embed_type', 'timestep'),
             class_embeddings_concat=model_config.get('class_embeddings_concat', False),
@@ -361,6 +387,13 @@ class SimpleDiffusionTrainer:
         self.optimizer.zero_grad()
         loss.backward()
         
+        # 计算梯度范数（调试用）
+        grad_norm = 0.0
+        for p in self.unet.parameters():
+            if p.grad is not None:
+                grad_norm += p.grad.norm().item() ** 2
+        grad_norm = grad_norm ** 0.5
+        
         # 梯度裁剪
         if self.config.get('gradient_clip', 1.0) > 0:
             torch.nn.utils.clip_grad_norm_(
@@ -371,29 +404,36 @@ class SimpleDiffusionTrainer:
         self.optimizer.step()
         self.lr_scheduler.step()
         
+        # 记录调试信息
+        self.debug_metrics['train_losses'].append(loss.item())
+        self.debug_metrics['grad_norms'].append(grad_norm)
+        
+        # 记录噪声预测统计
+        with torch.no_grad():
+            noise_pred_mean = model_pred.mean().item()
+            noise_pred_std = model_pred.std().item()
+            self.debug_metrics['noise_pred_stats'].append({
+                'mean': noise_pred_mean,
+                'std': noise_pred_std,
+                'min': model_pred.min().item(),
+                'max': model_pred.max().item()
+            })
+            
+            # 按时间步记录损失
+            for t in timesteps.cpu().numpy():
+                if t not in self.debug_metrics['timestep_losses']:
+                    self.debug_metrics['timestep_losses'][t] = []
+                self.debug_metrics['timestep_losses'][t].append(loss.item())
+        
         # 调试：偶尔检查条件是否影响输出
         if not hasattr(self, '_train_condition_checked'):
             self._train_condition_checked = 0
         self._train_condition_checked += 1
         
         if self._train_condition_checked % 500 == 0:  # 每500步检查一次
-            with torch.no_grad():
-                # 使用相同的输入，不同的条件
-                test_labels = torch.arange(min(4, batch_size), device=self.device)
-                test_dummy_encoder = torch.zeros(min(4, batch_size), 1, 1280, device=self.device)
-                test_out = self.unet(
-                    noisy_latents[:4], 
-                    timesteps[:4],
-                    class_labels=test_labels,
-                    encoder_hidden_states=test_dummy_encoder,
-                    return_dict=False
-                )[0]
-                # 计算不同条件下输出的差异
-                cond_diff = 0
-                for i in range(1, min(4, len(test_out))):
-                    cond_diff += (test_out[0] - test_out[i]).abs().mean().item()
-                cond_diff /= (min(4, len(test_out)) - 1)
-                print(f"\n  📊 训练步{self._train_condition_checked}: 条件差异={cond_diff:.6f}")
+            cond_response = self._test_condition_response()
+            self.debug_metrics['condition_response'].append(cond_response)
+            self._log_debug(f"Step {self._train_condition_checked}: 条件响应={cond_response:.4f}")
         
         # 更新EMA
         if self.ema is not None:
@@ -403,6 +443,54 @@ class SimpleDiffusionTrainer:
             'loss': loss.item(),
             'lr': self.optimizer.param_groups[0]['lr']
         }
+    
+    @torch.no_grad()
+    def _test_condition_response(self):
+        """测试条件机制的响应强度"""
+        self.unet.eval()
+        
+        # 创建测试输入
+        test_batch_size = 8
+        test_latents = torch.randn(test_batch_size, 4, 32, 32, device=self.device)
+        test_timesteps = torch.full((test_batch_size,), 500, device=self.device)
+        dummy_encoder = torch.zeros(test_batch_size, 1, 1280, device=self.device)
+        
+        # 测试不同类别
+        different_labels = torch.arange(test_batch_size, device=self.device) % 31
+        out_different = self.unet(
+            test_latents,
+            test_timesteps,
+            class_labels=different_labels,
+            encoder_hidden_states=dummy_encoder,
+            return_dict=False
+        )[0]
+        
+        # 测试相同类别
+        same_labels = torch.full((test_batch_size,), 5, device=self.device)
+        out_same = self.unet(
+            test_latents,
+            test_timesteps,
+            class_labels=same_labels,
+            encoder_hidden_states=dummy_encoder,
+            return_dict=False
+        )[0]
+        
+        # 计算差异
+        diff_between_classes = 0
+        for i in range(test_batch_size - 1):
+            diff_between_classes += (out_different[i] - out_different[i+1]).abs().mean().item()
+        diff_between_classes /= (test_batch_size - 1)
+        
+        diff_same_class = 0
+        for i in range(test_batch_size - 1):
+            diff_same_class += (out_same[i] - out_same[i+1]).abs().mean().item()
+        diff_same_class /= (test_batch_size - 1)
+        
+        # 条件响应强度 = 不同类别差异 / 相同类别差异
+        condition_response = diff_between_classes / (diff_same_class + 1e-6)
+        
+        self.unet.train()
+        return condition_response
     
     @torch.no_grad()
     def sample(self, num_samples: int = 8, labels: Optional[torch.Tensor] = None, use_ddpm: bool = None) -> torch.Tensor:
@@ -662,6 +750,37 @@ class SimpleDiffusionTrainer:
             # 计算平均损失
             avg_train_loss = np.mean(train_losses)
             
+            # 记录epoch级别的调试信息
+            self._log_debug(f"\n{'='*60}")
+            self._log_debug(f"Epoch {epoch+1}/{num_epochs} 完成")
+            self._log_debug(f"  训练损失: {avg_train_loss:.6f}")
+            
+            # 计算并记录梯度范数统计
+            if self.debug_metrics['grad_norms']:
+                recent_grad_norms = self.debug_metrics['grad_norms'][-len(train_loader):]
+                grad_norm_mean = np.mean(recent_grad_norms)
+                grad_norm_std = np.std(recent_grad_norms)
+                self._log_debug(f"  梯度范数: {grad_norm_mean:.4f} ± {grad_norm_std:.4f}")
+            
+            # 记录噪声预测统计
+            if self.debug_metrics['noise_pred_stats']:
+                recent_stats = self.debug_metrics['noise_pred_stats'][-100:]
+                pred_mean = np.mean([s['mean'] for s in recent_stats])
+                pred_std = np.mean([s['std'] for s in recent_stats])
+                self._log_debug(f"  噪声预测: mean={pred_mean:.4f}, std={pred_std:.4f}")
+            
+            # 测试条件响应
+            condition_response = self._test_condition_response()
+            self.debug_metrics['condition_response'].append(condition_response)
+            self._log_debug(f"  条件响应强度: {condition_response:.4f}")
+            
+            if condition_response < 1.2:
+                self._log_debug("    ⚠️ 条件响应较弱，可能还在学习中")
+            elif condition_response < 2.0:
+                self._log_debug("    🟡 条件响应中等，开始生效")
+            else:
+                self._log_debug("    ✅ 条件响应强，条件机制工作良好")
+            
             # 验证阶段
             if val_loader is not None:
                 val_losses = []
@@ -707,7 +826,7 @@ class SimpleDiffusionTrainer:
             
             # 定期保存模型和生成样本
             if (epoch + 1) % 5 == 0:
-                # 保存检查点
+                # 保存检查点（包含调试信息）
                 checkpoint = {
                     'epoch': epoch + 1,
                     'unet_state_dict': self.unet.state_dict(),
@@ -715,7 +834,9 @@ class SimpleDiffusionTrainer:
                     'scheduler_state_dict': self.lr_scheduler.state_dict(),
                     'train_loss': avg_train_loss,
                     'val_loss': avg_val_loss,
-                    'config': self.config
+                    'config': self.config,
+                    'debug_metrics': self.debug_metrics,  # 保存调试信息
+                    'condition_response': condition_response,  # 保存条件响应
                 }
                 
                 if self.ema is not None:
@@ -724,6 +845,13 @@ class SimpleDiffusionTrainer:
                 save_path = self.exp_dir / f'checkpoint_epoch_{epoch+1}.pt'
                 torch.save(checkpoint, save_path)
                 print(f"✅ 检查点已保存: {save_path}")
+                
+                # 保存调试信息到单独的文件
+                debug_save_path = self.exp_dir / f'debug_metrics_epoch_{epoch+1}.pkl'
+                import pickle
+                with open(debug_save_path, 'wb') as f:
+                    pickle.dump(self.debug_metrics, f)
+                self._log_debug(f"调试信息已保存: {debug_save_path}")
             
             # 每个epoch结束时生成样本
             print(f"\n🎨 生成第{epoch+1}个epoch的条件扩散图像...")
