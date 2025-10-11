@@ -154,13 +154,8 @@ class SimpleDiffusionTrainer:
         """初始化UNet和调度器"""
         model_config = self.config.get('model', {})
         
-        # 创建条件编码器（用于增强条件能力）
-        self.condition_encoder = nn.Sequential(
-            nn.Embedding(31, 128),  # 31个用户
-            nn.Linear(128, 256),
-            nn.SiLU(),
-            nn.Linear(256, model_config.get('cross_attention_dim', 128))
-        ).to(self.device)
+        # 注意：使用timestep风格的条件编码时，不需要额外的condition_encoder
+        # UNet内部会处理类别嵌入
         
         # 创建UNet2DConditionModel
         self.unet = UNet2DConditionModel(
@@ -171,12 +166,12 @@ class SimpleDiffusionTrainer:
             down_block_types=(
                 "DownBlock2D",
                 "DownBlock2D",
-                "CrossAttnDownBlock2D",
-                "CrossAttnDownBlock2D"
+                "DownBlock2D",
+                "DownBlock2D"
             ),
             up_block_types=(
-                "CrossAttnUpBlock2D",
-                "CrossAttnUpBlock2D", 
+                "UpBlock2D",
+                "UpBlock2D", 
                 "UpBlock2D",
                 "UpBlock2D"
             ),
@@ -184,12 +179,12 @@ class SimpleDiffusionTrainer:
             block_out_channels=tuple(model_config.get('block_out_channels', [128, 256, 512, 512])),
             layers_per_block=model_config.get('layers_per_block', 3),
             attention_head_dim=model_config.get('attention_head_dim', 16),
-            # 条件配置
+            # 条件配置 - timestep风格的类别嵌入
             num_class_embeds=model_config.get('num_class_embeds', 31),
             class_embed_type=model_config.get('class_embed_type', 'timestep'),
-            class_embeddings_concat=model_config.get('class_embeddings_concat', True),
-            # Cross attention配置
-            cross_attention_dim=model_config.get('cross_attention_dim', 128),
+            class_embeddings_concat=model_config.get('class_embeddings_concat', False),
+            # 不需要cross_attention_dim，因为我们不用CrossAttention
+            cross_attention_dim=None,
             # 其他配置
             norm_num_groups=model_config.get('norm_num_groups', 32),
             norm_eps=float(model_config.get('norm_eps', 1e-6)),
@@ -201,11 +196,9 @@ class SimpleDiffusionTrainer:
         
         # 打印模型信息
         unet_params = count_parameters(self.unet)
-        encoder_params = count_parameters(self.condition_encoder)
-        total_params = unet_params + encoder_params
+        total_params = unet_params
         print(f"✅ 模型初始化完成:")
         print(f"   - UNet参数量: {unet_params:,}")
-        print(f"   - 条件编码器参数量: {encoder_params:,}")
         print(f"   - 总参数量: {total_params:,}")
         print(f"   - 输入通道: 4 (VAE latent)")
         print(f"   - 类别数量: 31 (用户)")
@@ -215,9 +208,8 @@ class SimpleDiffusionTrainer:
             test_input = torch.randn(1, 4, 32, 32).to(self.device)
             test_timestep = torch.tensor([500]).to(self.device)
             test_label = torch.tensor([0]).to(self.device)
-            test_cond = self.condition_encoder(test_label).unsqueeze(1)
             test_output = self.unet(test_input, test_timestep, class_labels=test_label, 
-                                  encoder_hidden_states=test_cond, return_dict=False)[0]
+                                  return_dict=False)[0]
             print(f"   - 初始化测试: 输出std={test_output.std().item():.4f}")
         
         # 创建噪声调度器
@@ -250,7 +242,7 @@ class SimpleDiffusionTrainer:
         train_config = self.config.get('training', {}).get('pretrain', {})
         
         # 合并所有参数
-        all_params = list(self.unet.parameters()) + list(self.condition_encoder.parameters())
+        all_params = list(self.unet.parameters())
         
         # 优化器
         self.optimizer = torch.optim.AdamW(
@@ -289,7 +281,6 @@ class SimpleDiffusionTrainer:
     def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
         """单步训练"""
         self.unet.train()
-        self.condition_encoder.train()
         
         # 获取数据
         latents = batch['latent'].to(self.device)  # [B, 4, H, W]
@@ -346,17 +337,12 @@ class SimpleDiffusionTrainer:
             print(f"  - 加噪后range: [{noisy_latents.min().item():.4f}, {noisy_latents.max().item():.4f}]")
             self._noisy_debug_printed = True
         
-        # 生成条件嵌入
-        condition_embeds = self.condition_encoder(labels)  # [B, cross_attention_dim]
-        condition_embeds = condition_embeds.unsqueeze(1)  # [B, 1, cross_attention_dim]
-        
-        # 前向传播 - 使用增强的条件
+        # 前向传播 - 使用类别标签作为条件
         with autocast(enabled=self.config.get('use_amp', True)):
             model_pred = self.unet(
                 noisy_latents,
                 timesteps,
-                class_labels=labels,  # 类别标签
-                encoder_hidden_states=condition_embeds,  # 条件嵌入用于cross attention
+                class_labels=labels,  # 类别标签作为条件
                 return_dict=False
             )[0]
             
@@ -386,12 +372,10 @@ class SimpleDiffusionTrainer:
             with torch.no_grad():
                 # 使用相同的输入，不同的条件
                 test_labels = torch.arange(min(4, batch_size), device=self.device)
-                test_conds = self.condition_encoder(test_labels).unsqueeze(1)
                 test_out = self.unet(
                     noisy_latents[:4], 
                     timesteps[:4],
                     class_labels=test_labels,
-                    encoder_hidden_states=test_conds,
                     return_dict=False
                 )[0]
                 # 计算不同条件下输出的差异
@@ -414,15 +398,10 @@ class SimpleDiffusionTrainer:
     def sample(self, num_samples: int = 8, labels: Optional[torch.Tensor] = None) -> torch.Tensor:
         """生成样本"""
         self.unet.eval()
-        self.condition_encoder.eval()
         
         # 如果没有指定标签，随机采样
         if labels is None:
             labels = torch.randint(0, 31, (num_samples,), device=self.device)
-        
-        # 生成条件嵌入
-        condition_embeds = self.condition_encoder(labels)
-        condition_embeds = condition_embeds.unsqueeze(1)  # [B, 1, cross_attention_dim]
         
         # 初始化随机噪声 - 确保尺寸与训练数据匹配
         latent_size = self.config['data']['latent_size']
@@ -457,8 +436,7 @@ class SimpleDiffusionTrainer:
             noise_pred = self.unet(
                 latents,
                 timestep,
-                class_labels=labels,
-                encoder_hidden_states=condition_embeds,  # 使用条件嵌入
+                class_labels=labels,  # 直接使用类别标签作为条件
                 return_dict=False
             )[0]
             
@@ -479,12 +457,10 @@ class SimpleDiffusionTrainer:
                     with torch.no_grad():
                         # 测试相同输入，不同标签
                         test_labels = torch.tensor([0, 15], device=self.device)
-                        test_conds = self.condition_encoder(test_labels).unsqueeze(1)
                         test_noise1 = self.unet(
                             latents[:1].repeat(2, 1, 1, 1), 
                             timestep[:1].repeat(2),
                             class_labels=test_labels,
-                            encoder_hidden_states=test_conds,
                             return_dict=False
                         )[0]
                         diff = (test_noise1[0] - test_noise1[1]).abs().mean()
@@ -672,15 +648,10 @@ class SimpleDiffusionTrainer:
                             latents, noise, timesteps
                         )
                         
-                        # 生成条件嵌入
-                        condition_embeds = self.condition_encoder(labels)
-                        condition_embeds = condition_embeds.unsqueeze(1)
-                        
-                        # 预测
+                        # 预测 - 只使用class_labels
                         model_pred = self.unet(
                             noisy_latents, timesteps, 
                             class_labels=labels,
-                            encoder_hidden_states=condition_embeds,
                             return_dict=False
                         )[0]
                         
@@ -701,7 +672,6 @@ class SimpleDiffusionTrainer:
                 checkpoint = {
                     'epoch': epoch + 1,
                     'unet_state_dict': self.unet.state_dict(),
-                    'condition_encoder_state_dict': self.condition_encoder.state_dict(),
                     'optimizer_state_dict': self.optimizer.state_dict(),
                     'scheduler_state_dict': self.lr_scheduler.state_dict(),
                     'train_loss': avg_train_loss,
