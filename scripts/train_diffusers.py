@@ -208,7 +208,9 @@ class SimpleDiffusionTrainer:
             test_input = torch.randn(1, 4, 32, 32).to(self.device)
             test_timestep = torch.tensor([500]).to(self.device)
             test_label = torch.tensor([0]).to(self.device)
+            test_dummy_encoder = torch.zeros(1, 1, 128).to(self.device)
             test_output = self.unet(test_input, test_timestep, class_labels=test_label, 
+                                  encoder_hidden_states=test_dummy_encoder,
                                   return_dict=False)[0]
             print(f"   - 初始化测试: 输出std={test_output.std().item():.4f}")
         
@@ -338,11 +340,17 @@ class SimpleDiffusionTrainer:
             self._noisy_debug_printed = True
         
         # 前向传播 - 使用类别标签作为条件
+        # 创建dummy的encoder_hidden_states（Diffusers要求）
+        dummy_encoder_hidden_states = torch.zeros(
+            batch_size, 1, 128, device=self.device
+        )
+        
         with autocast(enabled=self.config.get('use_amp', True)):
             model_pred = self.unet(
                 noisy_latents,
                 timesteps,
                 class_labels=labels,  # 类别标签作为条件
+                encoder_hidden_states=dummy_encoder_hidden_states,
                 return_dict=False
             )[0]
             
@@ -372,10 +380,12 @@ class SimpleDiffusionTrainer:
             with torch.no_grad():
                 # 使用相同的输入，不同的条件
                 test_labels = torch.arange(min(4, batch_size), device=self.device)
+                test_dummy_encoder = torch.zeros(min(4, batch_size), 1, 128, device=self.device)
                 test_out = self.unet(
                     noisy_latents[:4], 
                     timesteps[:4],
                     class_labels=test_labels,
+                    encoder_hidden_states=test_dummy_encoder,
                     return_dict=False
                 )[0]
                 # 计算不同条件下输出的差异
@@ -395,13 +405,21 @@ class SimpleDiffusionTrainer:
         }
     
     @torch.no_grad()
-    def sample(self, num_samples: int = 8, labels: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def sample(self, num_samples: int = 8, labels: Optional[torch.Tensor] = None, use_ddpm: bool = None) -> torch.Tensor:
         """生成样本"""
         self.unet.eval()
         
         # 如果没有指定标签，随机采样
         if labels is None:
             labels = torch.randint(0, 31, (num_samples,), device=self.device)
+            
+        # 自动决定使用哪种采样器
+        if use_ddpm is None:
+            # 如果模型训练步数少于10000步，使用DDPM以获得更稳定的结果
+            use_ddpm = not hasattr(self, 'global_step') or self.global_step < 10000
+            if not hasattr(self, '_sampling_method_printed'):
+                print(f"  自动选择采样方法: {'DDPM（稳定）' if use_ddpm else 'DDIM（快速）'}")
+                self._sampling_method_printed = True
         
         # 初始化随机噪声 - 确保尺寸与训练数据匹配
         latent_size = self.config['data']['latent_size']
@@ -420,47 +438,66 @@ class SimpleDiffusionTrainer:
             print(f"  - 初始噪声std: {latents.std().item():.4f}")
             self._sample_debug_printed = True
         
-        # 设置推理调度器
-        self.inference_scheduler.set_timesteps(50)  # 使用50步DDIM
+        # 选择并设置采样器
+        if use_ddpm:
+            # 使用DDPM采样器
+            scheduler = self.noise_scheduler
+            scheduler.set_timesteps(1000)
+            # 只使用最后50步以加速（从纯噪声开始的最后50步）
+            timesteps = scheduler.timesteps[-50:]
+            desc = "Sampling (DDPM)"
+        else:
+            # 使用DDIM采样器
+            scheduler = self.inference_scheduler
+            scheduler.set_timesteps(50)
+            timesteps = scheduler.timesteps
+            desc = "Sampling (DDIM)"
         
         # 应用EMA权重
         if self.ema is not None:
             self.ema.apply_shadow()
         
         # 去噪过程
-        for t in tqdm(self.inference_scheduler.timesteps, desc="Sampling"):
+        for t in tqdm(timesteps, desc=desc):
             # 扩展t到batch维度
             timestep = t.expand(num_samples).to(self.device)
             
             # 预测噪声
+            # 创建dummy的encoder_hidden_states
+            dummy_encoder_hidden_states = torch.zeros(
+                num_samples, 1, 128, device=self.device
+            )
             noise_pred = self.unet(
                 latents,
                 timestep,
                 class_labels=labels,  # 直接使用类别标签作为条件
+                encoder_hidden_states=dummy_encoder_hidden_states,
                 return_dict=False
             )[0]
             
             # 去噪一步
-            latents = self.inference_scheduler.step(
+            latents = scheduler.step(
                 noise_pred, t, latents, return_dict=False
             )[0]
             
-            # 调试：检查中间步骤的范围
-            if t == self.inference_scheduler.timesteps[0] or t == self.inference_scheduler.timesteps[-1]:
+            # 调试：检查中间步骤的范围（仅在使用DDIM时）
+            if not use_ddpm and (t == timesteps[0] or t == timesteps[-1]):
                 print(f"  Step {t}: latent range [{latents.min():.2f}, {latents.max():.2f}], std={latents.std():.2f}")
                 # 同时检查预测的噪声
                 print(f"    Noise pred: range [{noise_pred.min():.2f}, {noise_pred.max():.2f}], std={noise_pred.std():.2f}")
                 
                 # 额外调试：检查不同条件是否产生不同输出
-                if t == self.inference_scheduler.timesteps[0] and not hasattr(self, '_condition_test_done'):
+                if t == timesteps[0] and not hasattr(self, '_condition_test_done'):
                     self._condition_test_done = True
                     with torch.no_grad():
                         # 测试相同输入，不同标签
                         test_labels = torch.tensor([0, 15], device=self.device)
+                        test_dummy_encoder = torch.zeros(2, 1, 128, device=self.device)
                         test_noise1 = self.unet(
                             latents[:1].repeat(2, 1, 1, 1), 
                             timestep[:1].repeat(2),
                             class_labels=test_labels,
+                            encoder_hidden_states=test_dummy_encoder,
                             return_dict=False
                         )[0]
                         diff = (test_noise1[0] - test_noise1[1]).abs().mean()
@@ -649,9 +686,11 @@ class SimpleDiffusionTrainer:
                         )
                         
                         # 预测 - 只使用class_labels
+                        dummy_encoder = torch.zeros(batch_size, 1, 128, device=self.device)
                         model_pred = self.unet(
                             noisy_latents, timesteps, 
                             class_labels=labels,
+                            encoder_hidden_states=dummy_encoder,
                             return_dict=False
                         )[0]
                         
@@ -717,9 +756,14 @@ class SimpleDiffusionTrainer:
         for i, t in enumerate(ddpm_scheduler.timesteps[:10]):  # 只测试前10步
             with torch.no_grad():
                 # 简单的噪声预测（应该预测0）
+                # 使用null class和dummy encoder
+                null_class = torch.tensor([31], device=self.device)  # null class
+                dummy_encoder = torch.zeros(1, 1, 128, device=self.device)
                 noise_pred = self.unet(
                     latents_ddpm,
                     t.unsqueeze(0).to(self.device),
+                    class_labels=null_class,
+                    encoder_hidden_states=dummy_encoder,
                     return_dict=False
                 )[0]
                 latents_ddpm = ddpm_scheduler.step(noise_pred, t, latents_ddpm, return_dict=False)[0]
@@ -736,6 +780,8 @@ class SimpleDiffusionTrainer:
                 noise_pred = self.unet(
                     latents_ddim,
                     t.unsqueeze(0).to(self.device),
+                    class_labels=null_class,
+                    encoder_hidden_states=dummy_encoder,
                     return_dict=False
                 )[0]
                 latents_ddim = self.inference_scheduler.step(noise_pred, t, latents_ddim, return_dict=False)[0]
