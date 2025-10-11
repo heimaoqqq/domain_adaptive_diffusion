@@ -1,6 +1,7 @@
 """
-基于HuggingFace Diffusers的域适应扩散模型训练脚本
-第一阶段：实现基础的条件DDPM（31个用户类别）
+ADM风格的条件扩散模型训练
+基于OpenAI guided-diffusion的scale-shift norm机制
+为Universal Guidance优化
 """
 
 import torch
@@ -45,10 +46,65 @@ from utils import (
 # VAE将在_init_vae中动态导入
 
 
-class SimpleDiffusionTrainer:
+# ADM风格的条件注入模块
+class ClassEmbedder(nn.Module):
     """
-    基于Diffusers的简化版训练器
-    第一阶段：只实现源域的条件生成
+    类别嵌入器 - 基于OpenAI ADM的官方实现
+    简洁高效，适合小数据集
+    """
+    def __init__(self, num_classes, embed_dim=512, use_cfg=False):
+        super().__init__()
+        self.num_classes = num_classes
+        self.use_cfg = use_cfg
+        
+        # 类别嵌入表
+        self.embedding = nn.Embedding(
+            num_classes + (1 if use_cfg else 0),  # +1 for null class if using CFG
+            embed_dim
+        )
+        
+        # 简单的投影层（ADM官方设计）
+        self.linear = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(embed_dim, embed_dim)
+        )
+        
+        # 初始化
+        nn.init.normal_(self.embedding.weight, std=0.02)
+        if use_cfg:
+            # null class初始化为0
+            self.embedding.weight.data[-1] = 0
+    
+    def forward(self, class_labels, drop_prob=0.0):
+        """
+        前向传播
+        Args:
+            class_labels: [B] 类别标签
+            drop_prob: CFG的dropout概率（训练时使用）
+        """
+        # CFG: 训练时随机替换为null class
+        if self.use_cfg and self.training and drop_prob > 0:
+            batch_size = class_labels.shape[0]
+            drop_mask = torch.rand(batch_size, device=class_labels.device) < drop_prob
+            class_labels = torch.where(
+                drop_mask,
+                torch.full_like(class_labels, self.num_classes),  # null class index
+                class_labels
+            )
+        
+        # 获取嵌入
+        x = self.embedding(class_labels)
+        
+        # 通过简单投影
+        x = self.linear(x)
+        
+        return x
+
+
+class ADMDiffusionTrainer:
+    """
+    ADM风格的条件扩散模型训练器
+    使用scale-shift norm进行条件注入，为UG优化
     """
     def __init__(self, config: Dict, device: str = 'cuda'):
         self.config = config
@@ -76,7 +132,7 @@ class SimpleDiffusionTrainer:
         
         # 创建日志文件
         self.log_file = self.exp_dir / 'debug_log.txt'
-        with open(self.log_file, 'w') as f:
+        with open(self.log_file, 'w', encoding='utf-8') as f:
             f.write(f"Training Debug Log - {datetime.now()}\n")
             f.write("="*60 + "\n")
         
@@ -93,7 +149,7 @@ class SimpleDiffusionTrainer:
         timestamp = datetime.now().strftime('%H:%M:%S')
         log_message = f"[{timestamp}] {message}"
         print(log_message)
-        with open(self.log_file, 'a') as f:
+        with open(self.log_file, 'a', encoding='utf-8') as f:
             f.write(log_message + "\n")
     
     def _init_vae(self):
@@ -177,71 +233,96 @@ class SimpleDiffusionTrainer:
         print("=" * 50)
     
     def _init_model(self):
-        """初始化UNet和调度器"""
+        """初始化ADM风格的UNet和调度器"""
         model_config = self.config.get('model', {})
         
-        # 注意：使用timestep风格的条件编码时，不需要额外的condition_encoder
-        # UNet内部会处理类别嵌入
+        # 使用UNet2DModel而非UNet2DConditionModel，因为我们要自己处理条件
+        from diffusers import UNet2DModel
         
-        # 创建UNet2DConditionModel
-        self.unet = UNet2DConditionModel(
-            # 基础配置
-            sample_size=self.config['data']['latent_size'],  # 重要：指定输入尺寸为32
+        # 创建ADM-Small UNet - 适合小数据集
+        # 基于OpenAI guided-diffusion的小模型配置
+        self.unet = UNet2DModel(
+            sample_size=self.config['data']['latent_size'],
             in_channels=model_config.get('in_channels', 4),
             out_channels=model_config.get('out_channels', 4),
-            down_block_types=(
-                "DownBlock2D",
-                "DownBlock2D",
-                "DownBlock2D",
-                "DownBlock2D"
-            ),
-            up_block_types=(
-                "UpBlock2D",
-                "UpBlock2D",
-                "UpBlock2D",
-                "UpBlock2D"
-            ),
-            # 模型大小配置
-            block_out_channels=tuple(model_config.get('block_out_channels', [128, 256, 512, 512])),
-            layers_per_block=model_config.get('layers_per_block', 3),
-            attention_head_dim=model_config.get('attention_head_dim', 16),
-            # 条件配置 - timestep风格的类别嵌入（经典方法）
-            num_class_embeds=model_config.get('num_class_embeds', 32),
-            class_embed_type=model_config.get('class_embed_type', 'timestep'),
-            class_embeddings_concat=model_config.get('class_embeddings_concat', False),
-            # 移除cross_attention_dim参数，让Diffusers使用默认值
-            # 其他配置
+            layers_per_block=model_config.get('layers_per_block', 2),  # 减少层数
+            block_out_channels=tuple(model_config.get('block_out_channels', 
+                                    [128, 256, 384, 384])),  # ADM-Small通道配置
+            down_block_types=[
+                "DownBlock2D",        # 第1层：纯卷积
+                "DownBlock2D",        # 第2层：纯卷积  
+                "AttnDownBlock2D",    # 第3层：带注意力
+                "DownBlock2D"         # 第4层：纯卷积
+            ],
+            up_block_types=[
+                "UpBlock2D",          # 第4层：纯卷积
+                "AttnUpBlock2D",      # 第3层：带注意力
+                "UpBlock2D",          # 第2层：纯卷积
+                "UpBlock2D"           # 第1层：纯卷积
+            ],
+            attention_head_dim=model_config.get('attention_head_dim', 8),  # 小注意力头
+            dropout=model_config.get('dropout', 0.1),
             norm_num_groups=model_config.get('norm_num_groups', 32),
             norm_eps=float(model_config.get('norm_eps', 1e-6)),
-            resnet_time_scale_shift="default",
             act_fn=model_config.get('act_fn', 'silu'),
-        )
+            resnet_time_scale_shift="scale_shift",  # ADM核心：scale-shift norm
+        ).to(self.device)
         
-        self.unet.to(self.device)
+        # 获取时间嵌入维度
+        time_embed_dim = self.unet.time_embedding.linear_1.out_features
+        
+        # 创建类别嵌入器（官方简洁版）
+        self.class_embedder = ClassEmbedder(
+            num_classes=model_config.get('num_class_embeds', 32) - 1,  # 31个用户
+            embed_dim=model_config.get('class_embed_dim', 512),  # 标准嵌入维度
+            use_cfg=False  # 小数据集暂不用CFG
+        ).to(self.device)
+        
+        # 简化CFG配置（小数据集不需要）
+        self.cfg_scale = 1.0  # 不使用CFG
+        self.cfg_dropout = 0.0
+        self.use_cfg = False
+        
+        # 条件组合器 - ADM官方设计（简单高效）
+        # 参考：OpenAI guided-diffusion
+        self.cond_combiner = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(time_embed_dim + 512, time_embed_dim)
+        ).to(self.device)
         
         # 打印模型信息
         unet_params = count_parameters(self.unet)
-        total_params = unet_params
-        print(f"✅ 模型初始化完成:")
-        print(f"   - UNet参数量: {unet_params:,}")
-        print(f"   - 总参数量: {total_params:,}")
-        print(f"   - 输入通道: 4 (VAE latent)")
-        print(f"   - 类别数量: 31 (用户)")
+        class_params = count_parameters(self.class_embedder)
+        cond_params = count_parameters(self.cond_combiner)
+        total_params = unet_params + class_params + cond_params
         
-        # 检查模型输出的初始范围
+        print(f"✅ ADM模型初始化完成:")
+        print(f"   - UNet参数量: {unet_params:,}")
+        print(f"   - 类别嵌入器参数量: {class_params:,}")
+        print(f"   - 条件组合器参数量: {cond_params:,}")
+        print(f"   - 总参数量: {total_params:,}")
+        print(f"   - 使用scale-shift norm: True")
+        
+        # 测试前向传播
         with torch.no_grad():
             test_input = torch.randn(1, 4, 32, 32).to(self.device)
             test_timestep = torch.tensor([500]).to(self.device)
             test_label = torch.tensor([0]).to(self.device)
-            test_encoder_hidden_states = torch.zeros(1, 1, 1280, device=self.device)
-            test_output = self.unet(test_input, test_timestep, class_labels=test_label,
-                                  encoder_hidden_states=test_encoder_hidden_states,
-                                  return_dict=False)[0]
+            
+            # 获取时间嵌入
+            t_emb = self.unet.time_embedding(test_timestep)
+            # 获取类别嵌入
+            c_emb = self.class_embedder(test_label)
+            # 组合条件
+            combined_emb = self.cond_combiner(torch.cat([t_emb, c_emb], dim=1))
+            
+            # 注意：我们需要修改UNet的前向传播来使用组合的嵌入
+            # 暂时使用标准前向传播测试
+            test_output = self.unet(test_input, test_timestep, return_dict=False)[0]
             print(f"   - 初始化测试: 输出std={test_output.std().item():.4f}")
         
+        
         # 创建噪声调度器
-        # 由于我们在训练时会除以scale_factor，数据会回到标准范围
-        # 所以可以使用标准的噪声调度器参数
         self.noise_scheduler = DDPMScheduler(
             num_train_timesteps=1000,
             beta_start=0.0001,
@@ -268,8 +349,10 @@ class SimpleDiffusionTrainer:
         """初始化优化器和学习率调度器"""
         train_config = self.config.get('training', {}).get('pretrain', {})
         
-        # 合并所有参数
-        all_params = list(self.unet.parameters())
+        # 合并所有参数 - 包括类别嵌入器和条件组合器
+        all_params = list(self.unet.parameters()) + \
+                    list(self.class_embedder.parameters()) + \
+                    list(self.cond_combiner.parameters())
         
         # 优化器
         self.optimizer = torch.optim.AdamW(
@@ -304,6 +387,41 @@ class SimpleDiffusionTrainer:
             print("✅ EMA初始化完成")
         else:
             self.ema = None
+    
+    def _forward_with_adm_condition(self, x, timesteps, class_labels):
+        """
+        ADM风格的条件前向传播
+        简洁高效，基于官方实现
+        """
+        # 获取时间嵌入
+        t_emb = self.unet.time_embedding(timesteps)
+        
+        # 获取类别嵌入（不使用CFG dropout）
+        c_emb = self.class_embedder(class_labels, drop_prob=0.0)
+        
+        # 组合条件嵌入 - 使用增强的组合器
+        combined_emb = self.cond_combiner(torch.cat([t_emb, c_emb], dim=1))
+        
+        # 临时替换time_embedding以返回组合的嵌入
+        original_time_embedding = self.unet.time_embedding
+        
+        class CombinedEmbedding(nn.Module):
+            def __init__(self, combined_emb):
+                super().__init__()
+                self.combined_emb = combined_emb
+            
+            def forward(self, t):
+                return self.combined_emb
+        
+        self.unet.time_embedding = CombinedEmbedding(combined_emb)
+        
+        # 正常的UNet前向传播
+        output = self.unet(x, timesteps, return_dict=False)[0]
+        
+        # 恢复原始的time_embedding
+        self.unet.time_embedding = original_time_embedding
+        
+        return output
             
     def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
         """单步训练"""
@@ -364,20 +482,9 @@ class SimpleDiffusionTrainer:
             print(f"  - 加噪后range: [{noisy_latents.min().item():.4f}, {noisy_latents.max().item():.4f}]")
             self._noisy_debug_printed = True
         
-        # 前向传播 - 使用类别标签作为条件
-        # 创建dummy encoder_hidden_states（UNet中间块的注意力层需要）
-        dummy_encoder_hidden_states = torch.zeros(
-            batch_size, 1, 1280, device=self.device
-        )
-        
+        # 前向传播 - ADM风格的条件注入
         with autocast(enabled=self.config.get('use_amp', True)):
-            model_pred = self.unet(
-                noisy_latents,
-                timesteps,
-                class_labels=labels,  # 类别标签作为条件
-                encoder_hidden_states=dummy_encoder_hidden_states,
-                return_dict=False
-            )[0]
+            model_pred = self._forward_with_adm_condition(noisy_latents, timesteps, labels)
             
             # 计算损失（预测噪声）
             loss = F.mse_loss(model_pred, noise)
@@ -388,9 +495,10 @@ class SimpleDiffusionTrainer:
         
         # 计算梯度范数（调试用）
         grad_norm = 0.0
-        for p in self.unet.parameters():
-            if p.grad is not None:
-                grad_norm += p.grad.norm().item() ** 2
+        for model in [self.unet, self.class_embedder, self.cond_combiner]:
+            for p in model.parameters():
+                if p.grad is not None:
+                    grad_norm += p.grad.norm().item() ** 2
         grad_norm = grad_norm ** 0.5
         
         # 梯度裁剪
@@ -455,24 +563,19 @@ class SimpleDiffusionTrainer:
         
         # 测试不同类别
         different_labels = torch.arange(test_batch_size, device=self.device) % 31
-        dummy_encoder_states = torch.zeros(test_batch_size, 1, 1280, device=self.device)
-        out_different = self.unet(
+        out_different = self._forward_with_adm_condition(
             test_latents,
             test_timesteps,
-            class_labels=different_labels,
-            encoder_hidden_states=dummy_encoder_states,
-            return_dict=False
-        )[0]
+            different_labels
+        )
         
         # 测试相同类别
         same_labels = torch.full((test_batch_size,), 5, device=self.device)
-        out_same = self.unet(
+        out_same = self._forward_with_adm_condition(
             test_latents,
             test_timesteps,
-            class_labels=same_labels,
-            encoder_hidden_states=dummy_encoder_states,
-            return_dict=False
-        )[0]
+            same_labels
+        )
         
         # 计算差异
         diff_between_classes = 0
@@ -544,22 +647,13 @@ class SimpleDiffusionTrainer:
         if self.ema is not None:
             self.ema.apply_shadow()
         
-        # 创建dummy encoder_hidden_states
-        dummy_encoder_states = torch.zeros(num_samples, 1, 1280, device=self.device)
-        
         # 去噪过程
         for t in tqdm(timesteps, desc=desc):
             # 扩展t到batch维度
             timestep = t.expand(num_samples).to(self.device)
             
-            # 预测噪声
-            noise_pred = self.unet(
-                latents,
-                timestep,
-                class_labels=labels,  # 直接使用类别标签作为条件
-                encoder_hidden_states=dummy_encoder_states,
-                return_dict=False
-            )[0]
+            # 预测噪声 - 使用ADM风格的条件注入
+            noise_pred = self._forward_with_adm_condition(latents, timestep, labels)
             
             # 去噪一步
             latents = scheduler.step(
@@ -578,14 +672,11 @@ class SimpleDiffusionTrainer:
                     with torch.no_grad():
                         # 测试相同输入，不同标签
                         test_labels = torch.tensor([0, 15], device=self.device)
-                        test_encoder_states = torch.zeros(2, 1, 1280, device=self.device)
-                        test_noise1 = self.unet(
+                        test_noise1 = self._forward_with_adm_condition(
                             latents[:1].repeat(2, 1, 1, 1), 
                             timestep[:1].repeat(2),
-                            class_labels=test_labels,
-                            encoder_hidden_states=test_encoder_states,
-                            return_dict=False
-                        )[0]
+                            test_labels
+                        )
                         diff = (test_noise1[0] - test_noise1[1]).abs().mean()
                         print(f"    条件测试: 不同类别输出差异 = {diff:.6f}")
         
@@ -884,14 +975,11 @@ class SimpleDiffusionTrainer:
                 # 简单的噪声预测（应该预测0）
                 # 使用null class
                 null_class = torch.tensor([31], device=self.device)  # null class
-                dummy_encoder_states = torch.zeros(1, 1, 1280, device=self.device)
-                noise_pred = self.unet(
+                noise_pred = self._forward_with_adm_condition(
                     latents_ddpm,
                     t.unsqueeze(0).to(self.device),
-                    class_labels=null_class,
-                    encoder_hidden_states=dummy_encoder_states,
-                    return_dict=False
-                )[0]
+                    null_class
+                )
                 latents_ddpm = ddpm_scheduler.step(noise_pred, t, latents_ddpm, return_dict=False)[0]
                 
             if i < 3:  # 打印前3步
@@ -903,13 +991,11 @@ class SimpleDiffusionTrainer:
         
         for i, t in enumerate(self.inference_scheduler.timesteps[:10]):  # 只测试前10步
             with torch.no_grad():
-                noise_pred = self.unet(
+                noise_pred = self._forward_with_adm_condition(
                     latents_ddim,
                     t.unsqueeze(0).to(self.device),
-                    class_labels=null_class,
-                    encoder_hidden_states=dummy_encoder_states,
-                    return_dict=False
-                )[0]
+                    null_class
+                )
                 latents_ddim = self.inference_scheduler.step(noise_pred, t, latents_ddim, return_dict=False)[0]
                 
             if i < 3:  # 打印前3步
@@ -951,8 +1037,8 @@ def main():
     # 设置随机种子
     set_seed(config.get('seed', 42))
     
-    # 创建训练器并开始训练
-    trainer = SimpleDiffusionTrainer(config, device=args.device)
+    # 创建ADM风格的训练器并开始训练
+    trainer = ADMDiffusionTrainer(config, device=args.device)
     trainer.train()
 
 
