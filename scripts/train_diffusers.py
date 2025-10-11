@@ -215,8 +215,7 @@ class SimpleDiffusionTrainer:
         if ema_config.get('use_ema', True):
             self.ema = EMA(
                 self.unet,
-                beta=ema_config.get('beta', 0.9999),
-                update_every=ema_config.get('update_every', 1)
+                decay=ema_config.get('beta', 0.9999)  # EMA使用decay参数，不是beta
             )
             print("✅ EMA初始化完成")
         else:
