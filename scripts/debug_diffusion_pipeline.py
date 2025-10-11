@@ -200,8 +200,8 @@ class DiffusionDebugger:
         
         # 测试1：相同输入，不同类别
         labels1 = torch.tensor([0, 15]).to(self.device)  # 不同类别
-        # 创建dummy的encoder_hidden_states（即使不使用）
-        dummy_encoder_hidden_states = torch.zeros(2, 1, 128).to(self.device)
+        # 创建dummy的encoder_hidden_states（使用标准SD的1280维）
+        dummy_encoder_hidden_states = torch.zeros(2, 1, 1280).to(self.device)
         
         with torch.no_grad():
             out1 = unet(x, t, class_labels=labels1, 
