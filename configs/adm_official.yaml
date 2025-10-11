@@ -56,6 +56,9 @@ ema_decay: 0.9999
 
 # VAE配置
 vae_checkpoint: "/kaggle/input/kl-vae-best-pt/kl_vae_best.pt"
+vae_input_range: "[-1, 1]"  # VAE训练时的输入范围
+vae_output_range: "[0, 1]"  # VAE解码后的输出范围（根据实际观察）
+vae_scale_factor: 0.18215  # Stable Diffusion标准scale factor
 
 # FP16配置
 use_fp16: true  # 启用混合精度训练，减少显存占用，加速训练
