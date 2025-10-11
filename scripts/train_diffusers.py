@@ -180,7 +180,7 @@ class SimpleDiffusionTrainer:
             layers_per_block=model_config.get('layers_per_block', 3),
             attention_head_dim=model_config.get('attention_head_dim', 16),
             # 条件配置 - timestep风格的类别嵌入
-            num_class_embeds=model_config.get('num_class_embeds', 31),
+            num_class_embeds=model_config.get('num_class_embeds', 32),
             class_embed_type=model_config.get('class_embed_type', 'timestep'),
             class_embeddings_concat=model_config.get('class_embeddings_concat', False),
             # 不需要cross_attention_dim，因为我们不用CrossAttention
@@ -223,7 +223,7 @@ class SimpleDiffusionTrainer:
             beta_end=0.02,
             beta_schedule="linear",
             variance_type="fixed_small",
-            clip_sample=False,  # 标准范围内不需要裁剪
+            clip_sample=True,  # 启用clip以稳定训练
             prediction_type="epsilon",  # 预测噪声
         )
         
@@ -233,7 +233,7 @@ class SimpleDiffusionTrainer:
             beta_start=0.0001,
             beta_end=0.02,
             beta_schedule="linear",
-            clip_sample=False,
+            clip_sample=True,  # 启用clip以防止数值爆炸
             set_alpha_to_one=False,
             steps_offset=1,
             prediction_type="epsilon",
