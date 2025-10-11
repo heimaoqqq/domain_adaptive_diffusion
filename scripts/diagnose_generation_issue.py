@@ -298,9 +298,9 @@ def diagnose_all(config_path, vae_checkpoint, data_path, checkpoint_dir, device=
 
 def main():
     # 配置路径
-    config_path = "domain_adaptive_diffusion/configs/adm_official.yaml"
+    config_path = "/kaggle/working/domain_adaptive_diffusion/configs/adm_official.yaml"
     vae_checkpoint = "/kaggle/input/kl-vae-best-pt/kl_vae_best.pt"
-    data_path = "/kaggle/working/data/processed"
+    data_path = "/kaggle/input/data-latent"
     checkpoint_dir = "/kaggle/working/ddpm_checkpoints"
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
