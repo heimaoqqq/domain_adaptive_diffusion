@@ -16,7 +16,7 @@ def diagnose_and_fix():
     
     # 1. 加载一个batch看看
     train_loader, _ = create_dataloaders(
-        data_path="/kaggle/working/data/processed",
+        data_path="/kaggle/input/data-latent",
         phase='pretrain',
         batch_size=4,
         num_workers=0,
