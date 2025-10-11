@@ -79,6 +79,8 @@ def debug_ddim_explosion():
         # 初始噪声
         x_t = torch.randn(1, 4, 32, 32).to(device)
         label = torch.tensor([0]).to(device)
+        # 创建dummy的encoder_hidden_states
+        dummy_encoder_hidden_states = torch.zeros(1, 1, 128).to(device)
         
         stds = [x_t.std().item()]
         
@@ -89,7 +91,9 @@ def debug_ddim_explosion():
                 timestep = t.expand(x_t.shape[0])
                 
                 # 预测噪声（使用真实UNet）
-                noise_pred = unet(x_t, timestep, class_labels=label, return_dict=False)[0]
+                noise_pred = unet(x_t, timestep, class_labels=label, 
+                                encoder_hidden_states=dummy_encoder_hidden_states,
+                                return_dict=False)[0]
                 
                 # DDIM步骤
                 x_t = scheduler.step(noise_pred, t, x_t, return_dict=False)[0]
@@ -126,7 +130,9 @@ def debug_ddim_explosion():
         with torch.no_grad():
             for i, t in enumerate(scheduler.timesteps[:5]):
                 timestep = t.expand(x_t.shape[0])
-                noise_pred = unet(x_t, timestep, class_labels=label, return_dict=False)[0]
+                noise_pred = unet(x_t, timestep, class_labels=label, 
+                                encoder_hidden_states=dummy_encoder_hidden_states,
+                                return_dict=False)[0]
                 noise_pred = noise_pred * scale  # 缩放噪声预测
                 x_t = scheduler.step(noise_pred, t, x_t, return_dict=False)[0]
                 
