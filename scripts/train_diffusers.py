@@ -211,13 +211,16 @@ class SimpleDiffusionTrainer:
         print(f"   - 类别数量: 31 (用户)")
         
         # 创建噪声调度器
+        # 由于我们在训练时会除以scale_factor，数据会回到标准范围
+        # 所以可以使用标准的噪声调度器参数
         self.noise_scheduler = DDPMScheduler(
             num_train_timesteps=1000,
             beta_start=0.0001,
             beta_end=0.02,
             beta_schedule="linear",
             variance_type="fixed_small",
-            clip_sample=False,
+            clip_sample=False,  # 标准范围内不需要裁剪
+            prediction_type="epsilon",  # 预测噪声
         )
         
         # 用于推理的调度器（可选DDIM加速）
@@ -229,6 +232,7 @@ class SimpleDiffusionTrainer:
             clip_sample=False,
             set_alpha_to_one=False,
             steps_offset=1,
+            prediction_type="epsilon",
         )
         
     def _init_optimizer(self):
@@ -282,18 +286,29 @@ class SimpleDiffusionTrainer:
         labels = batch['class_label'].to(self.device)    # [B]
         batch_size = latents.shape[0]
         
-        # 重要：验证latents已经被scale_factor缩放
-        # prepare_microdoppler_data.py在第361行已经进行了缩放：latents = latents * scale_factor
-        # 这里的latents应该已经在正确的范围内（约 mean=0, std=0.18）
+        # 重要：数据预处理
+        # prepare_microdoppler_data.py已经将latents乘以了scale_factor (0.18215)
+        # 但是Diffusers期望数据在标准范围内（std约1）
+        # 解决方案：在训练时先除以scale_factor，让数据回到标准范围
         
         # 首次训练时打印调试信息
         if not hasattr(self, '_debug_printed'):
             print(f"\n📊 训练数据调试信息:")
-            print(f"  - Latent shape: {latents.shape}")
-            print(f"  - Latent mean: {latents.mean().item():.4f}")
-            print(f"  - Latent std: {latents.std().item():.4f}")
-            print(f"  - Expected latent size from config: {self.config['data']['latent_size']}")
+            print(f"  - 原始Latent shape: {latents.shape}")
+            print(f"  - 原始Latent mean: {latents.mean().item():.4f}")
+            print(f"  - 原始Latent std: {latents.std().item():.4f}")
+            
+            # 除以scale_factor让数据回到标准范围
+            if hasattr(self.vae, 'scale_factor'):
+                latents_normalized = latents / self.vae.scale_factor
+                print(f"  - 归一化后mean: {latents_normalized.mean().item():.4f}")
+                print(f"  - 归一化后std: {latents_normalized.std().item():.4f}")
+            
             self._debug_printed = True
+        
+        # 重要：除以scale_factor让数据回到标准范围
+        if hasattr(self.vae, 'scale_factor'):
+            latents = latents / self.vae.scale_factor
         
         # 采样随机时间步
         timesteps = torch.randint(
@@ -303,9 +318,23 @@ class SimpleDiffusionTrainer:
         
         # 添加噪声
         noise = torch.randn_like(latents)
+        
+        # 调试：检查噪声是否正确缩放
+        if not hasattr(self, '_noise_debug_printed'):
+            print(f"\n🔊 噪声调试信息:")
+            print(f"  - 原始latents std: {latents.std().item():.4f}")
+            print(f"  - 噪声std: {noise.std().item():.4f}")
+            self._noise_debug_printed = True
+        
         noisy_latents = self.noise_scheduler.add_noise(
             latents, noise, timesteps
         )
+        
+        # 再次检查加噪后的范围
+        if not hasattr(self, '_noisy_debug_printed'):
+            print(f"  - 加噪后std: {noisy_latents.std().item():.4f}")
+            print(f"  - 加噪后range: [{noisy_latents.min().item():.4f}, {noisy_latents.max().item():.4f}]")
+            self._noisy_debug_printed = True
         
         # 生成条件嵌入
         condition_embeds = self.condition_encoder(labels)  # [B, cross_attention_dim]
@@ -403,14 +432,19 @@ class SimpleDiffusionTrainer:
             latents = self.inference_scheduler.step(
                 noise_pred, t, latents, return_dict=False
             )[0]
+            
+            # 调试：检查中间步骤的范围
+            if t == self.inference_scheduler.timesteps[0] or t == self.inference_scheduler.timesteps[-1]:
+                print(f"  Step {t}: latent range [{latents.min():.2f}, {latents.max():.2f}], std={latents.std():.2f}")
         
         # 恢复原始权重
         if self.ema is not None:
             self.ema.restore()
         
-        # 注意：不需要乘以scale_factor！
-        # 训练数据已经包含了scale_factor，DDPM学习的就是这个范围的分布
-        # 生成的latents应该直接在训练数据的范围内
+        # 重要：如果训练时除以了scale_factor，生成后需要乘回来
+        if hasattr(self.vae, 'scale_factor'):
+            latents = latents * self.vae.scale_factor
+            print(f"  ✅ 乘以scale_factor后: std={latents.std().item():.4f}, range=[{latents.min():.4f}, {latents.max():.4f}]")
         
         return latents
     
