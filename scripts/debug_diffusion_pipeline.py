@@ -200,9 +200,13 @@ class DiffusionDebugger:
         
         # 测试1：相同输入，不同类别
         labels1 = torch.tensor([0, 15]).to(self.device)  # 不同类别
+        # 创建dummy的encoder_hidden_states（即使不使用）
+        dummy_encoder_hidden_states = torch.zeros(2, 1, 128).to(self.device)
         
         with torch.no_grad():
-            out1 = unet(x, t, class_labels=labels1, return_dict=False)[0]
+            out1 = unet(x, t, class_labels=labels1, 
+                       encoder_hidden_states=dummy_encoder_hidden_states,
+                       return_dict=False)[0]
             
         print(f"  不同类别输出差异: {(out1[0] - out1[1]).abs().mean():.4f}")
         
@@ -210,16 +214,22 @@ class DiffusionDebugger:
         labels2 = torch.tensor([0, 0]).to(self.device)  # 相同类别
         
         with torch.no_grad():
-            out2 = unet(x, t, class_labels=labels2, return_dict=False)[0]
+            out2 = unet(x, t, class_labels=labels2, 
+                       encoder_hidden_states=dummy_encoder_hidden_states,
+                       return_dict=False)[0]
             
         print(f"  相同类别输出差异: {(out2[0] - out2[1]).abs().mean():.4f}")
         
         # 测试3：有条件vs无条件（使用null class）
         with torch.no_grad():
-            out_with_cond = unet(x[:1], t[:1], class_labels=labels1[:1], return_dict=False)[0]
+            out_with_cond = unet(x[:1], t[:1], class_labels=labels1[:1], 
+                               encoder_hidden_states=dummy_encoder_hidden_states[:1],
+                               return_dict=False)[0]
             # 使用null class（通常是num_classes）
             null_label = torch.tensor([31]).to(self.device)  # 31是null class
-            out_no_cond = unet(x[:1], t[:1], class_labels=null_label, return_dict=False)[0]
+            out_no_cond = unet(x[:1], t[:1], class_labels=null_label, 
+                             encoder_hidden_states=dummy_encoder_hidden_states[:1],
+                             return_dict=False)[0]
             
         print(f"  有/无条件输出差异: {(out_with_cond - out_no_cond).abs().mean():.4f}")
         
