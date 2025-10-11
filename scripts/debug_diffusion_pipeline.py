@@ -239,9 +239,9 @@ def main():
     debugger = DiffusionDebugger()
     
     # 配置路径（需要根据实际情况调整）
-    vae_checkpoint = "D:\\Ysj\\新建文件夹\\VA-VAE\\domain_adaptive_diffusion\\checkpoints\\kl_vae_best.pt"
-    data_path = "D:\\Ysj\\新建文件夹\\VA-VAE\\latent"
-    config_path = "D:\\Ysj\\新建文件夹\\VA-VAE\\domain_adaptive_diffusion\\configs\\diffusers_baseline.yaml"
+    vae_checkpoint = "/kaggle/input/kl-vae-best-pt/kl_vae_best.pt"
+    data_path = "/kaggle/input/data-latent"
+    config_path = "/kaggle/working/domain_adaptive_diffusion/configs/diffusers_baseline.yaml"
     
     # 1. 调试VAE
     vae = debugger.debug_vae_details(vae_checkpoint)
