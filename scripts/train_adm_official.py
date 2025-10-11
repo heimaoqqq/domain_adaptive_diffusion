@@ -459,28 +459,49 @@ class VAEWrapper:
     """
     VAE包装器，处理编码和解码
     """
-    def __init__(self, vae_checkpoint_path):
-        # 动态导入VAE
-        from simplified_vavae import VAE
+    def __init__(self, vae_checkpoint_path, device='cuda'):
+        # 导入已训练的KL-VAE
+        import sys
+        from pathlib import Path
+        sys.path.append(str(Path(__file__).parent.parent.parent))
+        from domain_adaptive_diffusion.vae.kl_vae import KLAutoEncoder
         
-        # 加载VAE
-        self.vae = VAE()
+        self.device = device
+        
+        # 加载KL-VAE
+        self.vae = KLAutoEncoder(
+            in_channels=3,
+            latent_dim=4,
+            channels=[128, 256, 512, 512],
+            z_channels=4
+        )
+        
+        # 加载权重
         checkpoint = torch.load(vae_checkpoint_path, map_location='cpu')
-        self.vae.load_state_dict(checkpoint['model_state_dict'])
+        if 'model_state_dict' in checkpoint:
+            self.vae.load_state_dict(checkpoint['model_state_dict'])
+        else:
+            self.vae.load_state_dict(checkpoint)
+        
         self.vae.eval()
+        
+        # 移动到正确的设备
+        self.vae = self.vae.to(device)
         
         # 冻结VAE
         for param in self.vae.parameters():
             param.requires_grad = False
         
-        # VAE配置
+        # VAE配置（KL-VAE的标准scale factor）
         self.scale_factor = 0.18215
     
     def encode(self, images):
         """编码图像到latent space"""
         with torch.no_grad():
-            # 假设图像已经在[-1, 1]范围
-            latents = self.vae.encode(images)
+            # KL-VAE期望输入在[-1, 1]范围
+            posterior = self.vae.encode(images)
+            # 从分布中采样
+            latents = posterior.sample()
             # 应用scale factor（用于数值稳定性）
             latents = latents * self.scale_factor
         return latents
@@ -490,6 +511,7 @@ class VAEWrapper:
         with torch.no_grad():
             # 反向scale factor
             latents = latents / self.scale_factor
+            # KL-VAE的decode直接返回图像
             images = self.vae.decode(latents)
         return images
 
@@ -657,7 +679,7 @@ class OfficialADMTrainer:
         
         # 初始化VAE
         print("初始化VAE...")
-        self.vae = VAEWrapper(config['vae_checkpoint'])
+        self.vae = VAEWrapper(config['vae_checkpoint'], device=device)
         
         # 初始化模型
         print("初始化ADM模型...")
