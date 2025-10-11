@@ -28,8 +28,7 @@ model:
   dropout: 0.1  # 适度dropout
   
   # 条件机制
-  num_class_embeds: 32  # 31用户 + 1 null
-  class_embed_dim: 512  # 标准嵌入维度
+  num_class_embeds: 32  # 31用户 + 1 null（官方方法）
   
   # 归一化配置
   norm_num_groups: 32
