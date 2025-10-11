@@ -1,0 +1,52 @@
+# 官方ADM配置
+# 基于OpenAI guided-diffusion，适配VAE latent space
+
+experiment:
+  name: "adm_official"
+  description: "Official ADM implementation with VAE latents"
+  seed: 42
+
+# 数据配置
+data:
+  latent_path: "/kaggle/working/data/processed"
+  image_size: 256
+  latent_size: 32  # VAE latent: 256/8=32
+  num_classes: 31
+
+# 模型配置（基于官方ADM-Small）
+model:
+  model_channels: 128  # 基础通道数
+  num_res_blocks: 2    # 每层ResBlock数量
+  channel_mult: [1, 2, 3, 3]  # 通道倍增器
+  dropout: 0.1
+  num_classes: 32  # 31用户 + 1 null class
+  use_scale_shift_norm: true  # ADM核心创新
+
+# 扩散配置
+diffusion:
+  timesteps: 1000
+  beta_schedule: "linear"  # 或 "scaled_linear"
+  beta_start: 0.00085
+  beta_end: 0.012
+
+# 训练配置
+training:
+  epochs: 100
+  batch_size: 16
+  learning_rate: 1e-4
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  
+  # 验证
+  val_every: 5
+  save_every: 10
+
+# EMA配置
+use_ema: true
+ema_decay: 0.9999
+
+# VAE配置
+vae_checkpoint: "/kaggle/input/kl-vae-best-pt/kl_vae_best.pt"
+
+# 输出配置
+output_dir: "/kaggle/working/experiments/adm_official"
