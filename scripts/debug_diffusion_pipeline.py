@@ -163,11 +163,11 @@ class DiffusionDebugger:
             
         model_config = config.get('model', {})
         
-        # 创建模型
+        # 创建模型 - 使用与train_diffusers.py相同的配置
         unet = UNet2DConditionModel(
-            sample_size=32,
-            in_channels=4,
-            out_channels=4,
+            sample_size=config['data']['latent_size'],  # 32
+            in_channels=model_config.get('in_channels', 4),
+            out_channels=model_config.get('out_channels', 4),
             down_block_types=(
                 "DownBlock2D",
                 "DownBlock2D",
@@ -186,7 +186,11 @@ class DiffusionDebugger:
             num_class_embeds=model_config.get('num_class_embeds', 31),
             class_embed_type=model_config.get('class_embed_type', 'timestep'),
             class_embeddings_concat=model_config.get('class_embeddings_concat', False),
-            cross_attention_dim=None,  # 不使用cross attention
+            # 重要：对于timestep类型的条件编码，不需要设置cross_attention_dim
+            norm_num_groups=model_config.get('norm_num_groups', 32),
+            norm_eps=float(model_config.get('norm_eps', 1e-6)),
+            resnet_time_scale_shift="default",
+            act_fn=model_config.get('act_fn', 'silu'),
         ).to(self.device)
         
         # 测试不同条件下的输出
