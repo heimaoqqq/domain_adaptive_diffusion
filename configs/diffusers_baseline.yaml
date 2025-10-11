@@ -47,7 +47,7 @@ noise_scheduler:
 training:
   pretrain:
     epochs: 50  # 先训练50个epoch看效果
-    batch_size: 32  # 256x256图像，latent 64x64，适当减小batch size
+    batch_size: 64  # 256x256图像，latent 64x64，适当减小batch size
     learning_rate: 1e-4  # 标准学习率
     weight_decay: 0.01
     gradient_clip: 1.0
