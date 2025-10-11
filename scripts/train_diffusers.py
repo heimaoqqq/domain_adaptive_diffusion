@@ -165,6 +165,7 @@ class SimpleDiffusionTrainer:
         # 创建UNet2DConditionModel
         self.unet = UNet2DConditionModel(
             # 基础配置
+            sample_size=self.config['data']['latent_size'],  # 重要：指定输入尺寸为32
             in_channels=model_config.get('in_channels', 4),
             out_channels=model_config.get('out_channels', 4),
             down_block_types=(
@@ -285,6 +286,15 @@ class SimpleDiffusionTrainer:
         # prepare_microdoppler_data.py在第361行已经进行了缩放：latents = latents * scale_factor
         # 这里的latents应该已经在正确的范围内（约 mean=0, std=0.18）
         
+        # 首次训练时打印调试信息
+        if not hasattr(self, '_debug_printed'):
+            print(f"\n📊 训练数据调试信息:")
+            print(f"  - Latent shape: {latents.shape}")
+            print(f"  - Latent mean: {latents.mean().item():.4f}")
+            print(f"  - Latent std: {latents.std().item():.4f}")
+            print(f"  - Expected latent size from config: {self.config['data']['latent_size']}")
+            self._debug_printed = True
+        
         # 采样随机时间步
         timesteps = torch.randint(
             0, self.noise_scheduler.config.num_train_timesteps,
@@ -351,13 +361,22 @@ class SimpleDiffusionTrainer:
         condition_embeds = self.condition_encoder(labels)
         condition_embeds = condition_embeds.unsqueeze(1)  # [B, 1, cross_attention_dim]
         
-        # 初始化随机噪声
+        # 初始化随机噪声 - 确保尺寸与训练数据匹配
+        latent_size = self.config['data']['latent_size']
         latents = torch.randn(
             num_samples, 4, 
-            self.config['data']['latent_size'],
-            self.config['data']['latent_size'],
+            latent_size,
+            latent_size,
             device=self.device
         )
+        
+        # 调试：验证生成的初始噪声范围
+        if not hasattr(self, '_sample_debug_printed'):
+            print(f"\n🎲 采样调试信息:")
+            print(f"  - 初始噪声shape: {latents.shape}")
+            print(f"  - 初始噪声mean: {latents.mean().item():.4f}")
+            print(f"  - 初始噪声std: {latents.std().item():.4f}")
+            self._sample_debug_printed = True
         
         # 设置推理调度器
         self.inference_scheduler.set_timesteps(50)  # 使用50步DDIM
@@ -389,10 +408,9 @@ class SimpleDiffusionTrainer:
         if self.ema is not None:
             self.ema.restore()
         
-        # 重要：生成的latents需要乘以scale_factor以匹配训练数据的范围
-        # 训练数据已经被scale_factor缩放，生成的数据也需要相同处理
-        if hasattr(self, 'vae') and self.vae is not None:
-            latents = latents * self.vae.scale_factor
+        # 注意：不需要乘以scale_factor！
+        # 训练数据已经包含了scale_factor，DDPM学习的就是这个范围的分布
+        # 生成的latents应该直接在训练数据的范围内
         
         return latents
     
@@ -419,12 +437,22 @@ class SimpleDiffusionTrainer:
         all_latents = torch.cat(all_latents, dim=0)[:num_samples]
         
         # 调试：检查生成的latents范围
-        print(f"\n生成的latents统计:")
+        print(f"\n生成的latents统计（去噪后）:")
         print(f"  - Shape: {all_latents.shape}")
         print(f"  - Mean: {all_latents.mean().item():.4f}")
         print(f"  - Std: {all_latents.std().item():.4f}")
         print(f"  - Min: {all_latents.min().item():.4f}")
         print(f"  - Max: {all_latents.max().item():.4f}")
+        
+        # 与训练数据对比
+        if hasattr(self, 'train_loader'):
+            sample_batch = next(iter(self.train_loader))
+            real_latents = sample_batch['latent'][:7].to(self.device)
+            print(f"\n训练数据latents统计（对比）:")
+            print(f"  - Mean: {real_latents.mean().item():.4f}")
+            print(f"  - Std: {real_latents.std().item():.4f}")
+            print(f"  - Min: {real_latents.min().item():.4f}")
+            print(f"  - Max: {real_latents.max().item():.4f}")
         
         # 解码为图像
         images = self.vae.decode_latents(all_latents)
