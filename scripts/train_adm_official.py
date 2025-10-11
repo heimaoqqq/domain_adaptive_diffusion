@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+from torch.cuda.amp import autocast, GradScaler
 from pathlib import Path
 import numpy as np
 from tqdm import tqdm
@@ -157,8 +158,8 @@ class QKVAttention(nn.Module):
 
 class ResBlock(TimestepBlock):
     """
-    残差块，支持scale-shift norm
-    简化版，基于guided_diffusion/unet.py L154-256
+    残差块，支持scale-shift norm和上下采样
+    基于guided_diffusion/unet.py L154-256
     """
     def __init__(
         self,
@@ -167,6 +168,8 @@ class ResBlock(TimestepBlock):
         dropout,
         out_channels=None,
         use_scale_shift_norm=False,
+        up=False,
+        down=False,
     ):
         super().__init__()
         self.channels = channels
@@ -174,6 +177,18 @@ class ResBlock(TimestepBlock):
         self.dropout = dropout
         self.out_channels = out_channels or channels
         self.use_scale_shift_norm = use_scale_shift_norm
+        self.up = up
+        self.down = down
+        
+        # 处理上下采样
+        if up:
+            self.h_upd = nn.Upsample(scale_factor=2, mode='nearest')
+            self.x_upd = nn.Upsample(scale_factor=2, mode='nearest')
+        elif down:
+            self.h_upd = nn.AvgPool2d(kernel_size=2, stride=2)
+            self.x_upd = nn.AvgPool2d(kernel_size=2, stride=2)
+        else:
+            self.h_upd = self.x_upd = nn.Identity()
         
         self.in_layers = nn.Sequential(
             normalization(channels),
@@ -204,7 +219,16 @@ class ResBlock(TimestepBlock):
             self.skip_connection = nn.Conv2d(channels, self.out_channels, 1)
     
     def forward(self, x, emb):
-        h = self.in_layers(x)
+        # 应用上下采样到输入
+        if self.up or self.down:
+            in_rest, in_conv = self.in_layers[:-1], self.in_layers[-1]
+            h = in_rest(x)
+            h = self.h_upd(h)
+            x = self.x_upd(x)
+            h = in_conv(h)
+        else:
+            h = self.in_layers(x)
+        
         emb_out = self.emb_layers(emb).type(h.dtype)
         while len(emb_out.shape) < len(h.shape):
             emb_out = emb_out[..., None]
@@ -226,8 +250,9 @@ class ResBlock(TimestepBlock):
 
 class SimplifiedADMUNet(nn.Module):
     """
-    简化的ADM UNet，适配VAE latent space
+    ADM UNet，适配VAE latent space
     基于guided_diffusion/unet.py的UNetModel
+    支持FP16和ResBlock采样
     """
     def __init__(
         self,
@@ -239,6 +264,8 @@ class SimplifiedADMUNet(nn.Module):
         dropout=0.1,
         num_classes=32,  # 31 users + 1 null
         use_scale_shift_norm=True,
+        use_fp16=False,
+        resblock_updown=True,  # 使用ResBlock进行上下采样
     ):
         super().__init__()
         
@@ -249,6 +276,9 @@ class SimplifiedADMUNet(nn.Module):
         self.channel_mult = channel_mult
         self.num_classes = num_classes
         self.use_scale_shift_norm = use_scale_shift_norm
+        self.use_fp16 = use_fp16
+        self.dtype = torch.float16 if use_fp16 else torch.float32
+        self.resblock_updown = resblock_updown
         
         # 时间嵌入
         time_embed_dim = model_channels * 4
@@ -296,11 +326,27 @@ class SimplifiedADMUNet(nn.Module):
             
             if level != len(channel_mult) - 1:
                 # 下采样
-                self.input_blocks.append(
-                    TimestepEmbedSequential(
-                        nn.Conv2d(ch, ch, 3, stride=2, padding=1)
+                if self.resblock_updown:
+                    # 使用ResBlock进行下采样
+                    self.input_blocks.append(
+                        TimestepEmbedSequential(
+                            ResBlock(
+                                ch,
+                                time_embed_dim,
+                                dropout,
+                                out_channels=ch,
+                                use_scale_shift_norm=use_scale_shift_norm,
+                                down=True,
+                            )
+                        )
                     )
-                )
+                else:
+                    # 简单卷积下采样
+                    self.input_blocks.append(
+                        TimestepEmbedSequential(
+                            nn.Conv2d(ch, ch, 3, stride=2, padding=1)
+                        )
+                    )
                 input_block_chans.append(ch)
                 ds *= 2
         
@@ -343,9 +389,24 @@ class SimplifiedADMUNet(nn.Module):
                 
                 if level and i == num_res_blocks:
                     # 上采样
-                    layers.append(
-                        nn.ConvTranspose2d(ch, ch, 4, stride=2, padding=1)
-                    )
+                    if self.resblock_updown:
+                        # 使用ResBlock进行上采样
+                        layers.insert(
+                            0,
+                            ResBlock(
+                                ch,
+                                time_embed_dim,
+                                dropout,
+                                out_channels=ch,
+                                use_scale_shift_norm=use_scale_shift_norm,
+                                up=True,
+                            )
+                        )
+                    else:
+                        # 简单转置卷积上采样
+                        layers.append(
+                            nn.ConvTranspose2d(ch, ch, 4, stride=2, padding=1)
+                        )
                     ds //= 2
                 
                 self.output_blocks.append(TimestepEmbedSequential(*layers))
@@ -359,7 +420,7 @@ class SimplifiedADMUNet(nn.Module):
     
     def forward(self, x, timesteps, y=None):
         """
-        前向传播
+        前向传播（支持FP16）
         x: [B, C, H, W] VAE latents
         timesteps: [B] 时间步
         y: [B] 类别标签（可选）
@@ -376,7 +437,7 @@ class SimplifiedADMUNet(nn.Module):
         
         # UNet前向传播
         hs = []
-        h = x.type(torch.float32)
+        h = x.type(self.dtype)  # 转换到目标精度
         
         for module in self.input_blocks:
             h = module(h, emb)
@@ -582,11 +643,12 @@ class GaussianDiffusion:
 
 class OfficialADMTrainer:
     """
-    官方ADM训练器
+    官方ADM训练器（支持FP16混合精度训练）
     """
     def __init__(self, config: Dict, device: str = 'cuda'):
         self.config = config
         self.device = device
+        self.use_fp16 = config.get('use_fp16', True)
         
         # 设置实验目录
         self.exp_dir = Path(config['output_dir'])
@@ -608,6 +670,8 @@ class OfficialADMTrainer:
             dropout=config['model'].get('dropout', 0.1),
             num_classes=config['model'].get('num_classes', 32),
             use_scale_shift_norm=True,  # ADM核心
+            use_fp16=self.use_fp16,  # 启用FP16
+            resblock_updown=True,  # 使用ResBlock采样
         ).to(device)
         
         print(f"模型参数量: {count_parameters(self.model):,}")
@@ -633,7 +697,13 @@ class OfficialADMTrainer:
         if config.get('use_ema', True):
             self.ema_model = self._create_ema_model()
         
+        # FP16 Scaler
+        self.scaler = GradScaler() if self.use_fp16 else None
+        
         self.global_step = 0
+        
+        print(f"✅ FP16混合精度: {'启用' if self.use_fp16 else '禁用'}")
+        print(f"✅ ResBlock上下采样: 启用")
     
     def _create_ema_model(self):
         """创建EMA模型"""
@@ -654,7 +724,7 @@ class OfficialADMTrainer:
                 ema_param.data.mul_(decay).add_(param.data, alpha=1 - decay)
     
     def train_step(self, batch):
-        """训练一步"""
+        """训练一步（支持FP16）"""
         self.model.train()
         
         # 获取数据
@@ -665,20 +735,44 @@ class OfficialADMTrainer:
         # 随机时间步
         t = torch.randint(0, self.diffusion.timesteps, (batch_size,), device=self.device)
         
-        # 计算损失
-        losses = self.diffusion.training_losses(
-            self.model,
-            latents,
-            t,
-            model_kwargs={"y": labels}
-        )
-        loss = losses["loss"].mean()
-        
-        # 反向传播
-        self.optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-        self.optimizer.step()
+        # 混合精度训练
+        if self.use_fp16:
+            with autocast():
+                # 计算损失（自动转换到FP16）
+                losses = self.diffusion.training_losses(
+                    self.model,
+                    latents,
+                    t,
+                    model_kwargs={"y": labels}
+                )
+                loss = losses["loss"].mean()
+            
+            # 反向传播（使用scaler）
+            self.optimizer.zero_grad()
+            self.scaler.scale(loss).backward()
+            
+            # 梯度裁剪（需要先unscale）
+            self.scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+            
+            # 优化器步进
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+        else:
+            # 标准训练（FP32）
+            losses = self.diffusion.training_losses(
+                self.model,
+                latents,
+                t,
+                model_kwargs={"y": labels}
+            )
+            loss = losses["loss"].mean()
+            
+            # 反向传播
+            self.optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+            self.optimizer.step()
         
         # 更新EMA
         self._update_ema()
@@ -729,15 +823,17 @@ class OfficialADMTrainer:
         # 随机类别
         labels = torch.randint(0, 31, (num_samples,), device=self.device)
         
-        # 采样
-        samples = self.diffusion.sample(
-            self.model,
-            shape,
-            model_kwargs={"y": labels}
-        )
+        # FP16推理
+        with autocast(enabled=self.use_fp16):
+            # 采样
+            samples = self.diffusion.sample(
+                self.model,
+                shape,
+                model_kwargs={"y": labels}
+            )
         
-        # 解码
-        images = self.vae.decode(samples)
+        # 解码（VAE在FP32运行）
+        images = self.vae.decode(samples.float())
         
         # 保存图像（这里省略可视化代码）
         print(f"生成样本统计: mean={images.mean():.3f}, std={images.std():.3f}")
@@ -761,29 +857,31 @@ class OfficialADMTrainer:
         # 为前8个用户生成样本（可视化限制）
         num_users_to_show = min(8, 31)
         
-        for user_id in range(num_users_to_show):
-            # 创建批次标签
-            labels = torch.full((samples_per_user,), user_id, device=self.device)
-            shape = (samples_per_user, 4, 32, 32)
-            
-            # 采样
-            print(f"  生成用户{user_id}的样本...")
-            samples = self.diffusion.sample(
-                model,
-                shape,
-                model_kwargs={"y": labels}
-            )
-            
-            all_samples.append(samples)
-            all_labels.append(labels)
+        # FP16推理
+        with autocast(enabled=self.use_fp16):
+            for user_id in range(num_users_to_show):
+                # 创建批次标签
+                labels = torch.full((samples_per_user,), user_id, device=self.device)
+                shape = (samples_per_user, 4, 32, 32)
+                
+                # 采样
+                print(f"  生成用户{user_id}的样本...")
+                samples = self.diffusion.sample(
+                    model,
+                    shape,
+                    model_kwargs={"y": labels}
+                )
+                
+                all_samples.append(samples)
+                all_labels.append(labels)
         
         # 合并所有样本
         all_samples = torch.cat(all_samples, dim=0)
         all_labels = torch.cat(all_labels, dim=0)
         
-        # 解码到图像空间
+        # 解码到图像空间（VAE在FP32运行）
         print("  解码latents到图像...")
-        images = self.vae.decode(all_samples)  # [N, 3, 256, 256]
+        images = self.vae.decode(all_samples.float())  # [N, 3, 256, 256]
         
         # 创建网格可视化
         self._save_image_grid(images, all_labels, epoch)
