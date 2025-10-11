@@ -569,8 +569,9 @@ class GaussianDiffusion:
         if noise is None:
             noise = torch.randn_like(x_start)
         
-        sqrt_alphas_cumprod_t = self.sqrt_alphas_cumprod[t].to(x_start.device)
-        sqrt_one_minus_alphas_cumprod_t = self.sqrt_one_minus_alphas_cumprod[t].to(x_start.device)
+        # 确保索引在CPU上进行，然后移动到正确的设备
+        sqrt_alphas_cumprod_t = self.sqrt_alphas_cumprod[t.cpu()].to(x_start.device)
+        sqrt_one_minus_alphas_cumprod_t = self.sqrt_one_minus_alphas_cumprod[t.cpu()].to(x_start.device)
         
         # 扩展维度以匹配图像
         while len(sqrt_alphas_cumprod_t.shape) < len(x_start.shape):
@@ -611,22 +612,38 @@ class GaussianDiffusion:
         # 模型预测
         model_output = model(x, t, **model_kwargs)
         
-        # 计算均值
+        # 计算均值（使用CPU索引）
+        sqrt_recip_alphas_cumprod_t = self.sqrt_recip_alphas_cumprod[t.cpu()].to(x.device)
+        sqrt_recipm1_alphas_cumprod_t = self.sqrt_recipm1_alphas_cumprod[t.cpu()].to(x.device)
+        
+        # 扩展维度以匹配x的形状
+        while len(sqrt_recip_alphas_cumprod_t.shape) < len(x.shape):
+            sqrt_recip_alphas_cumprod_t = sqrt_recip_alphas_cumprod_t[..., None]
+            sqrt_recipm1_alphas_cumprod_t = sqrt_recipm1_alphas_cumprod_t[..., None]
+        
         pred_xstart = (
-            self.sqrt_recip_alphas_cumprod[t].to(x.device) * x
-            - self.sqrt_recipm1_alphas_cumprod[t].to(x.device) * model_output
+            sqrt_recip_alphas_cumprod_t * x
+            - sqrt_recipm1_alphas_cumprod_t * model_output
         )
         pred_xstart = torch.clamp(pred_xstart, -1, 1)
         
-        # 计算后验均值
+        # 计算后验均值（使用CPU索引）
+        posterior_mean_coef1_t = self.posterior_mean_coef1[t.cpu()].to(x.device)
+        posterior_mean_coef2_t = self.posterior_mean_coef2[t.cpu()].to(x.device)
+        
+        # 扩展维度
+        while len(posterior_mean_coef1_t.shape) < len(x.shape):
+            posterior_mean_coef1_t = posterior_mean_coef1_t[..., None]
+            posterior_mean_coef2_t = posterior_mean_coef2_t[..., None]
+        
         posterior_mean = (
-            self.posterior_mean_coef1[t].to(x.device) * pred_xstart
-            + self.posterior_mean_coef2[t].to(x.device) * x
+            posterior_mean_coef1_t * pred_xstart
+            + posterior_mean_coef2_t * x
         )
         
         # 采样
         noise = torch.randn_like(x) if t[0] > 0 else 0
-        posterior_variance = self.posterior_variance[t].to(x.device)
+        posterior_variance = self.posterior_variance[t.cpu()].to(x.device)
         while len(posterior_variance.shape) < len(x.shape):
             posterior_variance = posterior_variance[..., None]
         
