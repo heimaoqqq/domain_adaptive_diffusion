@@ -60,6 +60,7 @@ class SimpleDiffusionTrainer:
         
         # 保存配置
         save_config(config, self.exp_dir / 'config.yaml')
+        print(f"✅ 配置已保存到: {self.exp_dir / 'config.yaml'}")
         
         # 初始化组件
         self._init_vae()
@@ -84,7 +85,10 @@ class SimpleDiffusionTrainer:
             
             # 加载权重
             checkpoint = torch.load(vae_checkpoint, map_location=self.device)
-            if 'state_dict' in checkpoint:
+            if 'model_state_dict' in checkpoint:
+                # 从完整的checkpoint中提取模型权重
+                self.vae.load_state_dict(checkpoint['model_state_dict'])
+            elif 'state_dict' in checkpoint:
                 self.vae.load_state_dict(checkpoint['state_dict'])
             else:
                 self.vae.load_state_dict(checkpoint)
@@ -145,8 +149,12 @@ class SimpleDiffusionTrainer:
         self.unet.to(self.device)
         
         # 打印模型信息
-        total_params = count_parameters(self.unet)
-        print(f"✅ UNet初始化完成:")
+        unet_params = count_parameters(self.unet)
+        encoder_params = count_parameters(self.condition_encoder)
+        total_params = unet_params + encoder_params
+        print(f"✅ 模型初始化完成:")
+        print(f"   - UNet参数量: {unet_params:,}")
+        print(f"   - 条件编码器参数量: {encoder_params:,}")
         print(f"   - 总参数量: {total_params:,}")
         print(f"   - 输入通道: 4 (VAE latent)")
         print(f"   - 类别数量: 31 (用户)")
