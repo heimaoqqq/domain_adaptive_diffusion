@@ -41,6 +41,15 @@ training:
   val_every: 5
   save_every: 10
 
+# 可视化配置
+visualization:
+  num_samples_per_user: 2  # 每个用户生成几张图像
+  num_users_to_show: 8     # 显示前几个用户（最多31）
+  save_every_epoch: true    # 是否每个epoch都保存图像
+  visualization_interval: 1 # 每隔几个epoch生成一次图像
+  grid_rows: 4              # 图像网格的行数
+  image_size: 256           # 输出图像尺寸
+
 # EMA配置
 use_ema: true
 ema_decay: 0.9999
