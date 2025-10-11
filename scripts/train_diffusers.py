@@ -398,8 +398,7 @@ class SimpleDiffusionTrainer:
             data_path=data_path,
             batch_size=batch_size,
             phase='pretrain',
-            num_workers=4,
-            pin_memory=True
+            num_workers=4
         )
         
         print(f"\n🚀 开始训练:")
