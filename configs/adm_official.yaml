@@ -31,7 +31,7 @@ diffusion:
 
 # 训练配置
 training:
-  epochs: 100
+  num_epochs: 100  # 改为num_epochs以保持一致性
   batch_size: 16
   learning_rate: 1e-4
   weight_decay: 0.01
