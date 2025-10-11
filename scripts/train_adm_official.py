@@ -673,16 +673,16 @@ class OfficialADMTrainer:
         print("初始化VAE...")
         self.vae = VAEWrapper(config['vae_checkpoint'], device=device)
         
-        # 初始化模型
+        # 初始化模型（确保所有数值参数类型正确）
         print("初始化ADM模型...")
         self.model = SimplifiedADMUNet(
             in_channels=4,
-            model_channels=config['model'].get('model_channels', 128),
+            model_channels=int(config['model'].get('model_channels', 128)),
             out_channels=4,
-            num_res_blocks=config['model'].get('num_res_blocks', 2),
+            num_res_blocks=int(config['model'].get('num_res_blocks', 2)),
             channel_mult=tuple(config['model'].get('channel_mult', [1, 2, 3, 3])),
-            dropout=config['model'].get('dropout', 0.1),
-            num_classes=config['model'].get('num_classes', 32),
+            dropout=float(config['model'].get('dropout', 0.1)),
+            num_classes=int(config['model'].get('num_classes', 32)),
             use_scale_shift_norm=True,  # ADM核心
             use_fp16=self.use_fp16,  # 启用FP16
             resblock_updown=True,  # 使用ResBlock采样
@@ -690,19 +690,19 @@ class OfficialADMTrainer:
         
         print(f"模型参数量: {count_parameters(self.model):,}")
         
-        # 初始化扩散过程
+        # 初始化扩散过程（确保数值类型正确）
         self.diffusion = GaussianDiffusion(
-            timesteps=config['diffusion']['timesteps'],
+            timesteps=int(config['diffusion']['timesteps']),
             beta_schedule=config['diffusion']['beta_schedule'],
-            beta_start=config['diffusion']['beta_start'],
-            beta_end=config['diffusion']['beta_end'],
+            beta_start=float(config['diffusion']['beta_start']),
+            beta_end=float(config['diffusion']['beta_end']),
         )
         
-        # 初始化优化器
+        # 初始化优化器（确保类型正确）
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
-            lr=config['training']['learning_rate'],
-            weight_decay=config['training']['weight_decay'],
+            lr=float(config['training']['learning_rate']),
+            weight_decay=float(config['training']['weight_decay']),
             betas=(0.9, 0.999),
         )
         
@@ -714,11 +714,11 @@ class OfficialADMTrainer:
         # FP16 Scaler
         self.scaler = GradScaler() if self.use_fp16 else None
         
-        # 设置数据加载器
+        # 设置数据加载器（确保batch_size类型正确）
         from utils import create_dataloaders
         self.train_loader, self.val_loader = create_dataloaders(
             self.config,
-            batch_size=config['training']['batch_size']
+            batch_size=int(config['training']['batch_size'])
         )
         
         self.global_step = 0
@@ -805,7 +805,7 @@ class OfficialADMTrainer:
     
     def train(self):
         """训练循环"""
-        num_epochs = self.config['training'].get('num_epochs', self.config['training'].get('epochs', 100))
+        num_epochs = int(self.config['training'].get('num_epochs', self.config['training'].get('epochs', 100)))
         
         for epoch in range(num_epochs):
             # 训练
@@ -1004,15 +1004,15 @@ def main():
         print(f"覆盖输出目录: {args.output_dir}")
     
     if args.batch_size:
-        config['training']['batch_size'] = args.batch_size
+        config['training']['batch_size'] = int(args.batch_size)
         print(f"覆盖批次大小: {args.batch_size}")
     
     if args.num_epochs:
-        config['training']['num_epochs'] = args.num_epochs
+        config['training']['num_epochs'] = int(args.num_epochs)
         print(f"覆盖训练轮数: {args.num_epochs}")
     
     # 设置随机种子
-    set_seed(config.get('seed', 42))
+    set_seed(int(config.get('seed', 42)))
     
     # 打印最终配置
     print("\n" + "="*60)
@@ -1020,8 +1020,8 @@ def main():
     print(f"  数据路径: {config['data']['latent_path']}")
     print(f"  VAE模型: {config['vae_checkpoint']}")
     print(f"  输出目录: {config['output_dir']}")
-    print(f"  批次大小: {config['training']['batch_size']}")
-    print(f"  训练轮数: {config['training'].get('num_epochs', config['training'].get('epochs', 100))}")
+    print(f"  批次大小: {int(config['training']['batch_size'])}")
+    print(f"  训练轮数: {int(config['training'].get('num_epochs', config['training'].get('epochs', 100)))}")
     print(f"  FP16: {'启用' if config.get('use_fp16', False) else '禁用'}")
     print("="*60 + "\n")
     
