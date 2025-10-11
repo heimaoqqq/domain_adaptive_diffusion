@@ -464,16 +464,15 @@ class VAEWrapper:
         import sys
         from pathlib import Path
         sys.path.append(str(Path(__file__).parent.parent.parent))
-        from domain_adaptive_diffusion.vae.kl_vae import KLAutoEncoder
+        from domain_adaptive_diffusion.vae.kl_vae import KL_VAE
         
         self.device = device
         
-        # 加载KL-VAE
-        self.vae = KLAutoEncoder(
-            in_channels=3,
-            latent_dim=4,
-            channels=[128, 256, 512, 512],
-            z_channels=4
+        # 加载KL-VAE（使用默认配置）
+        self.vae = KL_VAE(
+            ddconfig=None,  # 使用默认配置
+            embed_dim=4,    # 4通道latent
+            scale_factor=0.18215  # 标准scale factor
         )
         
         # 加载权重
@@ -492,27 +491,20 @@ class VAEWrapper:
         for param in self.vae.parameters():
             param.requires_grad = False
         
-        # VAE配置（KL-VAE的标准scale factor）
-        self.scale_factor = 0.18215
+        # 不需要手动管理scale_factor，KL_VAE内置了
     
     def encode(self, images):
         """编码图像到latent space"""
         with torch.no_grad():
-            # KL-VAE期望输入在[-1, 1]范围
-            posterior = self.vae.encode(images)
-            # 从分布中采样
-            latents = posterior.sample()
-            # 应用scale factor（用于数值稳定性）
-            latents = latents * self.scale_factor
+            # 使用KL_VAE内置的encode_images方法（自动处理scale factor）
+            latents = self.vae.encode_images(images)
         return latents
     
     def decode(self, latents):
         """解码latents到图像"""
         with torch.no_grad():
-            # 反向scale factor
-            latents = latents / self.scale_factor
-            # KL-VAE的decode直接返回图像
-            images = self.vae.decode(latents)
+            # 使用KL_VAE内置的decode_latents方法（自动处理scale factor）
+            images = self.vae.decode_latents(latents)
         return images
 
 
