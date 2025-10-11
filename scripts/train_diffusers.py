@@ -233,7 +233,8 @@ class SimpleDiffusionTrainer:
             test_input = torch.randn(1, 4, 32, 32).to(self.device)
             test_timestep = torch.tensor([500]).to(self.device)
             test_label = torch.tensor([0]).to(self.device)
-            test_output = self.unet(test_input, test_timestep, class_labels=test_label, 
+            test_output = self.unet(test_input, test_timestep, class_labels=test_label,
+                                  encoder_hidden_states=None,
                                   return_dict=False)[0]
             print(f"   - 初始化测试: 输出std={test_output.std().item():.4f}")
         
@@ -368,6 +369,7 @@ class SimpleDiffusionTrainer:
                 noisy_latents,
                 timesteps,
                 class_labels=labels,  # 类别标签作为条件
+                encoder_hidden_states=None,
                 return_dict=False
             )[0]
             
@@ -451,6 +453,7 @@ class SimpleDiffusionTrainer:
             test_latents,
             test_timesteps,
             class_labels=different_labels,
+            encoder_hidden_states=None,
             return_dict=False
         )[0]
         
@@ -460,6 +463,7 @@ class SimpleDiffusionTrainer:
             test_latents,
             test_timesteps,
             class_labels=same_labels,
+            encoder_hidden_states=None,
             return_dict=False
         )[0]
         
@@ -543,6 +547,7 @@ class SimpleDiffusionTrainer:
                 latents,
                 timestep,
                 class_labels=labels,  # 直接使用类别标签作为条件
+                encoder_hidden_states=None,
                 return_dict=False
             )[0]
             
@@ -567,6 +572,7 @@ class SimpleDiffusionTrainer:
                             latents[:1].repeat(2, 1, 1, 1), 
                             timestep[:1].repeat(2),
                             class_labels=test_labels,
+                            encoder_hidden_states=None,
                             return_dict=False
                         )[0]
                         diff = (test_noise1[0] - test_noise1[1]).abs().mean()
@@ -789,6 +795,7 @@ class SimpleDiffusionTrainer:
                         model_pred = self.unet(
                             noisy_latents, timesteps, 
                             class_labels=labels,
+                            encoder_hidden_states=None,
                             return_dict=False
                         )[0]
                         
@@ -869,6 +876,7 @@ class SimpleDiffusionTrainer:
                     latents_ddpm,
                     t.unsqueeze(0).to(self.device),
                     class_labels=null_class,
+                    encoder_hidden_states=None,
                     return_dict=False
                 )[0]
                 latents_ddpm = ddpm_scheduler.step(noise_pred, t, latents_ddpm, return_dict=False)[0]
@@ -886,6 +894,7 @@ class SimpleDiffusionTrainer:
                     latents_ddim,
                     t.unsqueeze(0).to(self.device),
                     class_labels=null_class,
+                    encoder_hidden_states=None,
                     return_dict=False
                 )[0]
                 latents_ddim = self.inference_scheduler.step(noise_pred, t, latents_ddim, return_dict=False)[0]
