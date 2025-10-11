@@ -21,7 +21,7 @@ def debug_ddim_explosion():
         up_block_types=("UpBlock2D", "UpBlock2D", "UpBlock2D", "UpBlock2D"),
         block_out_channels=(128, 256, 512, 512),
         layers_per_block=2,
-        num_class_embeds=31,
+        num_class_embeds=32,  # 31个真实类别 + 1个null class
         class_embed_type="timestep",
     ).to(device)
     
