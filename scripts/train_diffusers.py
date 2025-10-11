@@ -141,7 +141,7 @@ class SimpleDiffusionTrainer:
             cross_attention_dim=model_config.get('cross_attention_dim', 128),
             # 其他配置
             norm_num_groups=model_config.get('norm_num_groups', 32),
-            norm_eps=model_config.get('norm_eps', 1e-6),
+            norm_eps=float(model_config.get('norm_eps', 1e-6)),
             resnet_time_scale_shift="default",
             act_fn=model_config.get('act_fn', 'silu'),
         )
