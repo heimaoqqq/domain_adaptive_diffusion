@@ -190,16 +190,16 @@ class SimpleDiffusionTrainer:
             in_channels=model_config.get('in_channels', 4),
             out_channels=model_config.get('out_channels', 4),
             down_block_types=(
-                "DownBlock2D",  # 第一层保持简单
-                "AttnDownBlock2D",  # 使用带注意力的块
-                "AttnDownBlock2D",
-                "AttnDownBlock2D"
+                "DownBlock2D",
+                "DownBlock2D",
+                "DownBlock2D",
+                "DownBlock2D"
             ),
             up_block_types=(
-                "AttnUpBlock2D",
-                "AttnUpBlock2D",
-                "AttnUpBlock2D",
-                "UpBlock2D"  # 最后一层保持简单
+                "UpBlock2D",
+                "UpBlock2D",
+                "UpBlock2D",
+                "UpBlock2D"
             ),
             # 模型大小配置
             block_out_channels=tuple(model_config.get('block_out_channels', [128, 256, 512, 512])),
