@@ -210,6 +210,16 @@ class SimpleDiffusionTrainer:
         print(f"   - 输入通道: 4 (VAE latent)")
         print(f"   - 类别数量: 31 (用户)")
         
+        # 检查模型输出的初始范围
+        with torch.no_grad():
+            test_input = torch.randn(1, 4, 32, 32).to(self.device)
+            test_timestep = torch.tensor([500]).to(self.device)
+            test_label = torch.tensor([0]).to(self.device)
+            test_cond = self.condition_encoder(test_label).unsqueeze(1)
+            test_output = self.unet(test_input, test_timestep, class_labels=test_label, 
+                                  encoder_hidden_states=test_cond, return_dict=False)[0]
+            print(f"   - 初始化测试: 输出std={test_output.std().item():.4f}")
+        
         # 创建噪声调度器
         # 由于我们在训练时会除以scale_factor，数据会回到标准范围
         # 所以可以使用标准的噪声调度器参数
@@ -436,6 +446,8 @@ class SimpleDiffusionTrainer:
             # 调试：检查中间步骤的范围
             if t == self.inference_scheduler.timesteps[0] or t == self.inference_scheduler.timesteps[-1]:
                 print(f"  Step {t}: latent range [{latents.min():.2f}, {latents.max():.2f}], std={latents.std():.2f}")
+                # 同时检查预测的噪声
+                print(f"    Noise pred: range [{noise_pred.min():.2f}, {noise_pred.max():.2f}], std={noise_pred.std():.2f}")
         
         # 恢复原始权重
         if self.ema is not None:
