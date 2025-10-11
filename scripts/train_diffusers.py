@@ -96,9 +96,6 @@ class SimpleDiffusionTrainer:
             self.vae.to(self.device)
             self.vae.eval()
             print(f"✅ KL-VAE 加载成功: {vae_checkpoint}")
-            
-            # 检测VAE的输入输出范围
-            self._check_vae_ranges()
         else:
             self.vae = None
             print("⚠️ 未找到VAE，将无法可视化生成结果")
@@ -496,11 +493,19 @@ class SimpleDiffusionTrainer:
             num_workers=4
         )
         
+        # 保存到实例变量，供其他方法使用
+        self.train_loader = train_loader
+        self.val_loader = val_loader
+        
         print(f"\n🚀 开始训练:")
         print(f"   - Epochs: {num_epochs}")
         print(f"   - Batch size: {batch_size}")
         print(f"   - 训练样本数: {len(train_loader.dataset)}")
         print(f"   - 验证样本数: {len(val_loader.dataset) if val_loader else 0}")
+        
+        # 在数据加载器创建后检测VAE范围
+        if self.vae is not None:
+            self._check_vae_ranges()
         
         # 在训练开始前生成一次样本作为基准
         print("\n📸 生成初始样本作为基准...")
