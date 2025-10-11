@@ -183,7 +183,7 @@ class DiffusionDebugger:
             block_out_channels=tuple(model_config.get('block_out_channels', [128, 256, 512, 512])),
             layers_per_block=model_config.get('layers_per_block', 3),
             attention_head_dim=model_config.get('attention_head_dim', 16),
-            num_class_embeds=model_config.get('num_class_embeds', 31),
+            num_class_embeds=model_config.get('num_class_embeds', 32),
             class_embed_type=model_config.get('class_embed_type', 'timestep'),
             class_embeddings_concat=model_config.get('class_embeddings_concat', False),
             # 重要：对于timestep类型的条件编码，不需要设置cross_attention_dim
