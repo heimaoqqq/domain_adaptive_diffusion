@@ -700,10 +700,18 @@ class OfficialADMTrainer:
         # FP16 Scaler
         self.scaler = GradScaler() if self.use_fp16 else None
         
+        # 设置数据加载器
+        from utils import create_dataloaders
+        self.train_loader, self.val_loader = create_dataloaders(
+            self.config,
+            batch_size=config['training']['batch_size']
+        )
+        
         self.global_step = 0
         
         print(f"✅ FP16混合精度: {'启用' if self.use_fp16 else '禁用'}")
         print(f"✅ ResBlock上下采样: 启用")
+        print(f"✅ 数据集大小: 训练={len(self.train_loader.dataset)}, 验证={len(self.val_loader.dataset) if self.val_loader else 0}")
     
     def _create_ema_model(self):
         """创建EMA模型"""
@@ -783,19 +791,12 @@ class OfficialADMTrainer:
     
     def train(self):
         """训练循环"""
-        # 准备数据
-        from utils import create_dataloaders
-        train_loader, val_loader = create_dataloaders(
-            self.config,
-            batch_size=self.config['training']['batch_size']
-        )
-        
-        num_epochs = self.config['training']['epochs']
+        num_epochs = self.config['training'].get('num_epochs', self.config['training'].get('epochs', 100))
         
         for epoch in range(num_epochs):
             # 训练
             train_loss = AverageMeter()
-            pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")
+            pbar = tqdm(self.train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")
             
             for batch in pbar:
                 loss = self.train_step(batch)
@@ -954,16 +955,61 @@ class OfficialADMTrainer:
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, required=True)
-    parser.add_argument('--device', type=str, default='cuda')
+    parser = argparse.ArgumentParser(description='训练ADM条件扩散模型')
+    parser.add_argument('--config', type=str, required=True, help='配置文件路径')
+    parser.add_argument('--device', type=str, default='cuda', help='设备')
+    
+    # 可选参数，用于覆盖配置文件中的路径
+    parser.add_argument('--data_dir', type=str, default=None, 
+                       help='数据目录，覆盖配置文件中的latent_path')
+    parser.add_argument('--vae_checkpoint', type=str, default=None,
+                       help='VAE检查点路径，覆盖配置文件')
+    parser.add_argument('--output_dir', type=str, default=None,
+                       help='输出目录，覆盖配置文件')
+    parser.add_argument('--batch_size', type=int, default=None,
+                       help='批次大小，覆盖配置文件')
+    parser.add_argument('--num_epochs', type=int, default=None,
+                       help='训练轮数，覆盖配置文件')
+    
     args = parser.parse_args()
     
     # 加载配置
     config = load_config(args.config)
     
+    # 覆盖配置文件中的参数
+    if args.data_dir:
+        config['data']['latent_path'] = args.data_dir
+        print(f"覆盖数据路径: {args.data_dir}")
+    
+    if args.vae_checkpoint:
+        config['vae_checkpoint'] = args.vae_checkpoint
+        print(f"覆盖VAE路径: {args.vae_checkpoint}")
+    
+    if args.output_dir:
+        config['output_dir'] = args.output_dir
+        print(f"覆盖输出目录: {args.output_dir}")
+    
+    if args.batch_size:
+        config['training']['batch_size'] = args.batch_size
+        print(f"覆盖批次大小: {args.batch_size}")
+    
+    if args.num_epochs:
+        config['training']['num_epochs'] = args.num_epochs
+        print(f"覆盖训练轮数: {args.num_epochs}")
+    
     # 设置随机种子
     set_seed(config.get('seed', 42))
+    
+    # 打印最终配置
+    print("\n" + "="*60)
+    print("最终训练配置:")
+    print(f"  数据路径: {config['data']['latent_path']}")
+    print(f"  VAE模型: {config['vae_checkpoint']}")
+    print(f"  输出目录: {config['output_dir']}")
+    print(f"  批次大小: {config['training']['batch_size']}")
+    print(f"  训练轮数: {config['training'].get('num_epochs', config['training'].get('epochs', 100))}")
+    print(f"  FP16: {'启用' if config.get('use_fp16', False) else '禁用'}")
+    print("="*60 + "\n")
     
     # 创建训练器
     trainer = OfficialADMTrainer(config, args.device)
