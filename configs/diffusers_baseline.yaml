@@ -26,7 +26,7 @@ model:
   # 条件配置 - 使用更强的条件机制
   num_class_embeds: 31
   class_embed_type: "timestep"  # 使用timestep风格的嵌入，更强大
-  class_embeddings_concat: true  # 将类别嵌入连接到所有层
+  class_embeddings_concat: false  # timestep类型不需要concat
   # 添加cross attention支持
   cross_attention_dim: 128  # 条件嵌入维度
   # 归一化
