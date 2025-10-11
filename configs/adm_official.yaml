@@ -48,5 +48,8 @@ ema_decay: 0.9999
 # VAE配置
 vae_checkpoint: "/kaggle/input/kl-vae-best-pt/kl_vae_best.pt"
 
+# FP16配置
+use_fp16: true  # 启用混合精度训练，减少显存占用，加速训练
+
 # 输出配置
 output_dir: "/kaggle/working/experiments/adm_official"
