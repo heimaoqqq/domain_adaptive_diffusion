@@ -79,8 +79,8 @@ def debug_ddim_explosion():
         # 初始噪声
         x_t = torch.randn(1, 4, 32, 32).to(device)
         label = torch.tensor([0]).to(device)
-        # 创建dummy的encoder_hidden_states
-        dummy_encoder_hidden_states = torch.zeros(1, 1, 128).to(device)
+        # 创建dummy的encoder_hidden_states（使用1280维）
+        dummy_encoder_hidden_states = torch.zeros(1, 1, 1280).to(device)
         
         stds = [x_t.std().item()]
         
