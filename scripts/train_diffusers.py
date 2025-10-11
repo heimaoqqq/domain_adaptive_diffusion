@@ -228,7 +228,7 @@ class SimpleDiffusionTrainer:
         
         # 获取数据
         latents = batch['latent'].to(self.device)  # [B, 4, H, W]
-        labels = batch['label'].to(self.device)    # [B]
+        labels = batch['class_label'].to(self.device)    # [B]
         batch_size = latents.shape[0]
         
         # 重要：HuggingFace Diffusers期望latents已经被scale_factor缩放
@@ -434,7 +434,7 @@ class SimpleDiffusionTrainer:
                 with torch.no_grad():
                     for batch in val_loader:
                         latents = batch['latent'].to(self.device)
-                        labels = batch['label'].to(self.device)
+                        labels = batch['class_label'].to(self.device)
                         batch_size = latents.shape[0]
                         
                         # 随机时间步
