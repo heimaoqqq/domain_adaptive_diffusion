@@ -208,7 +208,7 @@ class SimpleDiffusionTrainer:
             test_input = torch.randn(1, 4, 32, 32).to(self.device)
             test_timestep = torch.tensor([500]).to(self.device)
             test_label = torch.tensor([0]).to(self.device)
-            test_dummy_encoder = torch.zeros(1, 1, 128).to(self.device)
+            test_dummy_encoder = torch.zeros(1, 1, 1280).to(self.device)
             test_output = self.unet(test_input, test_timestep, class_labels=test_label, 
                                   encoder_hidden_states=test_dummy_encoder,
                                   return_dict=False)[0]
@@ -342,7 +342,7 @@ class SimpleDiffusionTrainer:
         # 前向传播 - 使用类别标签作为条件
         # 创建dummy的encoder_hidden_states（Diffusers要求）
         dummy_encoder_hidden_states = torch.zeros(
-            batch_size, 1, 128, device=self.device
+            batch_size, 1, 1280, device=self.device
         )
         
         with autocast(enabled=self.config.get('use_amp', True)):
@@ -380,7 +380,7 @@ class SimpleDiffusionTrainer:
             with torch.no_grad():
                 # 使用相同的输入，不同的条件
                 test_labels = torch.arange(min(4, batch_size), device=self.device)
-                test_dummy_encoder = torch.zeros(min(4, batch_size), 1, 128, device=self.device)
+                test_dummy_encoder = torch.zeros(min(4, batch_size), 1, 1280, device=self.device)
                 test_out = self.unet(
                     noisy_latents[:4], 
                     timesteps[:4],
@@ -465,7 +465,7 @@ class SimpleDiffusionTrainer:
             # 预测噪声
             # 创建dummy的encoder_hidden_states
             dummy_encoder_hidden_states = torch.zeros(
-                num_samples, 1, 128, device=self.device
+                num_samples, 1, 1280, device=self.device
             )
             noise_pred = self.unet(
                 latents,
@@ -492,7 +492,7 @@ class SimpleDiffusionTrainer:
                     with torch.no_grad():
                         # 测试相同输入，不同标签
                         test_labels = torch.tensor([0, 15], device=self.device)
-                        test_dummy_encoder = torch.zeros(2, 1, 128, device=self.device)
+                        test_dummy_encoder = torch.zeros(2, 1, 1280, device=self.device)
                         test_noise1 = self.unet(
                             latents[:1].repeat(2, 1, 1, 1), 
                             timestep[:1].repeat(2),
@@ -686,7 +686,7 @@ class SimpleDiffusionTrainer:
                         )
                         
                         # 预测 - 只使用class_labels
-                        dummy_encoder = torch.zeros(batch_size, 1, 128, device=self.device)
+                        dummy_encoder = torch.zeros(batch_size, 1, 1280, device=self.device)
                         model_pred = self.unet(
                             noisy_latents, timesteps, 
                             class_labels=labels,
@@ -758,7 +758,7 @@ class SimpleDiffusionTrainer:
                 # 简单的噪声预测（应该预测0）
                 # 使用null class和dummy encoder
                 null_class = torch.tensor([31], device=self.device)  # null class
-                dummy_encoder = torch.zeros(1, 1, 128, device=self.device)
+                dummy_encoder = torch.zeros(1, 1, 1280, device=self.device)
                 noise_pred = self.unet(
                     latents_ddpm,
                     t.unsqueeze(0).to(self.device),
