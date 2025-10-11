@@ -343,22 +343,23 @@ class SimpleDiffusionTrainer:
         return latents
     
     @torch.no_grad()
-    def visualize_samples(self, epoch: int, num_samples: int = 16):
-        """可视化生成的样本"""
+    def visualize_samples(self, epoch: int, num_samples: int = 8):
+        """可视化生成的样本 - 生成少量代表性样本"""
         if self.vae is None:
             print("⚠️ 无VAE，跳过可视化")
             return
             
-        # 生成每个类别的样本
-        samples_per_class = max(1, num_samples // 31)
+        # 选择几个代表性的类别进行生成
+        selected_classes = [0, 5, 10, 15, 20, 25, 30][:num_samples]  # 均匀选择类别
         all_latents = []
         all_labels = []
         
-        for class_id in range(31):
-            labels = torch.full((samples_per_class,), class_id, device=self.device)
-            latents = self.sample(samples_per_class, labels)
+        print(f"生成{len(selected_classes)}个类别的样本...")
+        for class_id in selected_classes:
+            labels = torch.full((1,), class_id, device=self.device)
+            latents = self.sample(1, labels)
             all_latents.append(latents)
-            all_labels.extend([class_id] * samples_per_class)
+            all_labels.append(class_id)
         
         # 合并所有样本
         all_latents = torch.cat(all_latents, dim=0)[:num_samples]
@@ -371,20 +372,43 @@ class SimpleDiffusionTrainer:
         images_np = images.cpu().permute(0, 2, 3, 1).numpy()
         
         # 创建网格图
-        fig, axes = plt.subplots(4, 4, figsize=(12, 12))
-        axes = axes.flatten()
+        n_samples = len(all_labels)
+        n_cols = min(4, n_samples)
+        n_rows = (n_samples + n_cols - 1) // n_cols
         
-        for i, (img, label) in enumerate(zip(images_np[:16], all_labels[:16])):
-            axes[i].imshow(img)
-            axes[i].set_title(f'User {label+1}')
-            axes[i].axis('off')
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols*3, n_rows*3))
+        if n_rows == 1:
+            axes = [axes] if n_cols == 1 else axes
+        elif n_cols == 1:
+            axes = [[ax] for ax in axes]
+        else:
+            axes = axes.flatten()
         
+        for i, (img, label) in enumerate(zip(images_np, all_labels)):
+            if n_rows == 1 and n_cols == 1:
+                ax = axes[0]
+            else:
+                ax = axes[i] if isinstance(axes, list) else axes.flatten()[i]
+            ax.imshow(img)
+            ax.set_title(f'User {label+1}', fontsize=12, fontweight='bold')
+            ax.axis('off')
+        
+        # 隐藏多余的子图
+        total_subplots = n_rows * n_cols
+        for i in range(n_samples, total_subplots):
+            if isinstance(axes, list):
+                axes[i].axis('off')
+            else:
+                axes.flatten()[i].axis('off')
+        
+        plt.suptitle(f'Epoch {epoch} - Conditional Generated Samples', fontsize=16, fontweight='bold')
         plt.tight_layout()
+        
         save_path = self.exp_dir / f'samples_epoch_{epoch}.png'
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.close()
         
-        print(f"✅ 样本已保存到: {save_path}")
+        print(f"✅ 条件扩散样本已保存到: {save_path}")
     
     def train(self):
         """主训练循环"""
@@ -406,6 +430,10 @@ class SimpleDiffusionTrainer:
         print(f"   - Batch size: {batch_size}")
         print(f"   - 训练样本数: {len(train_loader.dataset)}")
         print(f"   - 验证样本数: {len(val_loader.dataset) if val_loader else 0}")
+        
+        # 在训练开始前生成一次样本作为基准
+        print("\n📸 生成初始样本作为基准...")
+        self.visualize_samples(0)
         
         # 训练循环
         for epoch in range(num_epochs):
@@ -487,14 +515,15 @@ class SimpleDiffusionTrainer:
                 }
                 
                 if self.ema is not None:
-                    checkpoint['ema_state_dict'] = self.ema.ema_model.state_dict()
+                    checkpoint['ema_state_dict'] = self.ema.state_dict()
                 
                 save_path = self.exp_dir / f'checkpoint_epoch_{epoch+1}.pt'
                 torch.save(checkpoint, save_path)
                 print(f"✅ 检查点已保存: {save_path}")
-                
-                # 生成样本
-                self.visualize_samples(epoch + 1)
+            
+            # 每个epoch结束时生成样本
+            print(f"\n🎨 生成第{epoch+1}个epoch的条件扩散图像...")
+            self.visualize_samples(epoch + 1)
         
         print("\n🎉 训练完成!")
 
