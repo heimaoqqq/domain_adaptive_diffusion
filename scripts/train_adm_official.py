@@ -328,18 +328,21 @@ class SimplifiedADMUNet(nn.Module):
                 # 下采样
                 if self.resblock_updown:
                     # 使用ResBlock进行下采样
+                    # 下采样的输出通道数应该是下一层的通道数
+                    out_ch = int(model_channels * channel_mult[level + 1])
                     self.input_blocks.append(
                         TimestepEmbedSequential(
                             ResBlock(
                                 ch,
                                 time_embed_dim,
                                 dropout,
-                                out_channels=ch,
+                                out_channels=out_ch,
                                 use_scale_shift_norm=use_scale_shift_norm,
                                 down=True,
                             )
                         )
                     )
+                    ch = out_ch  # 更新当前通道数
                 else:
                     # 简单卷积下采样
                     self.input_blocks.append(
@@ -391,17 +394,19 @@ class SimplifiedADMUNet(nn.Module):
                     # 上采样
                     if self.resblock_updown:
                         # 使用ResBlock进行上采样
-                        layers.insert(
-                            0,
+                        # 获取上采样后的输出通道数
+                        out_ch = int(model_channels * channel_mult[level - 1]) if level > 0 else model_channels
+                        layers.append(
                             ResBlock(
                                 ch,
                                 time_embed_dim,
                                 dropout,
-                                out_channels=ch,
+                                out_channels=out_ch,
                                 use_scale_shift_norm=use_scale_shift_norm,
                                 up=True,
                             )
                         )
+                        ch = out_ch  # 更新通道数
                     else:
                         # 简单转置卷积上采样
                         layers.append(
