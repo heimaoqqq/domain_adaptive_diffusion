@@ -253,7 +253,7 @@ class SimpleDiffusionTrainer:
         condition_embeds = condition_embeds.unsqueeze(1)  # [B, 1, cross_attention_dim]
         
         # 前向传播 - 使用增强的条件
-        with autocast(device_type='cuda', enabled=self.config.get('use_amp', True)):
+        with autocast(enabled=self.config.get('use_amp', True)):
             model_pred = self.unet(
                 noisy_latents,
                 timesteps,
