@@ -76,17 +76,11 @@ class SimpleDiffusionTrainer:
             # 导入正确的KL_VAE类
             from domain_adaptive_diffusion.vae.kl_vae import KL_VAE as DDPM_KL_VAE
             
-            # 创建VAE实例
-            vae_config = {
-                'in_channels': 3,
-                'out_channels': 3,
-                'latent_channels': 4,
-                'ch': 128,
-                'ch_mult': [1, 2, 4, 4],
-                'num_res_blocks': 2,
-                'scale_factor': 0.18215
-            }
-            self.vae = DDPM_KL_VAE(**vae_config)
+            # 创建VAE实例 - KL_VAE使用默认配置即可
+            self.vae = DDPM_KL_VAE(
+                embed_dim=4,  # latent通道数
+                scale_factor=0.18215  # 标准scale factor
+            )
             
             # 加载权重
             checkpoint = torch.load(vae_checkpoint, map_location=self.device)
