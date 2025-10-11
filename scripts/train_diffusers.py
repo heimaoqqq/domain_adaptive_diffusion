@@ -96,9 +96,62 @@ class SimpleDiffusionTrainer:
             self.vae.to(self.device)
             self.vae.eval()
             print(f"✅ KL-VAE 加载成功: {vae_checkpoint}")
+            
+            # 检测VAE的输入输出范围
+            self._check_vae_ranges()
         else:
             self.vae = None
             print("⚠️ 未找到VAE，将无法可视化生成结果")
+    
+    @torch.no_grad()
+    def _check_vae_ranges(self):
+        """检测VAE的输入输出范围，确保归一化正确"""
+        if self.vae is None:
+            return
+            
+        print("\n🔍 检测VAE输入输出范围...")
+        
+        # 从训练数据中采样一些真实的latents
+        sample_batch = next(iter(self.train_loader))
+        real_latents = sample_batch['latent'][:4].to(self.device)
+        
+        print(f"训练数据中的latent范围:")
+        print(f"  - Mean: {real_latents.mean().item():.4f}")
+        print(f"  - Std: {real_latents.std().item():.4f}")
+        print(f"  - Min: {real_latents.min().item():.4f}")
+        print(f"  - Max: {real_latents.max().item():.4f}")
+        
+        # 测试解码
+        decoded_images = self.vae.decode_latents(real_latents)
+        print(f"\n解码后的图像范围:")
+        print(f"  - Min: {decoded_images.min().item():.4f}")
+        print(f"  - Max: {decoded_images.max().item():.4f}")
+        
+        # 测试采样的latents范围（应该与真实latents相似）
+        noise = torch.randn(4, 4, self.config['data']['latent_size'], 
+                          self.config['data']['latent_size'], device=self.device)
+        print(f"\n随机噪声范围:")
+        print(f"  - Mean: {noise.mean().item():.4f}")
+        print(f"  - Std: {noise.std().item():.4f}")
+        
+        # 计算真实的scale factor
+        print(f"\nVAE scale_factor: {self.vae.scale_factor}")
+        
+        # 验证完整的编码-解码流程
+        print("\n🔄 测试完整的编码-解码流程...")
+        # 创建一个假的图像（在[0,1]范围）
+        fake_image = torch.rand(1, 3, 256, 256, device=self.device)
+        print(f"输入图像范围: [{fake_image.min():.4f}, {fake_image.max():.4f}]")
+        
+        # 编码
+        encoded = self.vae.encode_images(fake_image)
+        print(f"编码后的latent范围（包含scale_factor）: [{encoded.min():.4f}, {encoded.max():.4f}]")
+        
+        # 解码
+        decoded = self.vae.decode_latents(encoded)
+        print(f"解码后的图像范围: [{decoded.min():.4f}, {decoded.max():.4f}]")
+        
+        print("=" * 50)
     
     def _init_model(self):
         """初始化UNet和调度器"""
@@ -231,10 +284,9 @@ class SimpleDiffusionTrainer:
         labels = batch['class_label'].to(self.device)    # [B]
         batch_size = latents.shape[0]
         
-        # 重要：HuggingFace Diffusers期望latents已经被scale_factor缩放
-        # 我们的数据加载器应该已经加载了缩放后的latents
-        # 如果没有，需要在这里缩放：
-        # latents = latents * self.vae.scale_factor
+        # 重要：验证latents已经被scale_factor缩放
+        # prepare_microdoppler_data.py在第361行已经进行了缩放：latents = latents * scale_factor
+        # 这里的latents应该已经在正确的范围内（约 mean=0, std=0.18）
         
         # 采样随机时间步
         timesteps = torch.randint(
@@ -340,6 +392,11 @@ class SimpleDiffusionTrainer:
         if self.ema is not None:
             self.ema.restore()
         
+        # 重要：生成的latents需要乘以scale_factor以匹配训练数据的范围
+        # 训练数据已经被scale_factor缩放，生成的数据也需要相同处理
+        if hasattr(self, 'vae') and self.vae is not None:
+            latents = latents * self.vae.scale_factor
+        
         return latents
     
     @torch.no_grad()
@@ -364,8 +421,22 @@ class SimpleDiffusionTrainer:
         # 合并所有样本
         all_latents = torch.cat(all_latents, dim=0)[:num_samples]
         
+        # 调试：检查生成的latents范围
+        print(f"\n生成的latents统计:")
+        print(f"  - Shape: {all_latents.shape}")
+        print(f"  - Mean: {all_latents.mean().item():.4f}")
+        print(f"  - Std: {all_latents.std().item():.4f}")
+        print(f"  - Min: {all_latents.min().item():.4f}")
+        print(f"  - Max: {all_latents.max().item():.4f}")
+        
         # 解码为图像
         images = self.vae.decode_latents(all_latents)
+        
+        # 调试：检查解码后的图像范围
+        print(f"\n解码后的图像统计（clamp前）:")
+        print(f"  - Min: {images.min().item():.4f}")
+        print(f"  - Max: {images.max().item():.4f}")
+        
         images = torch.clamp(images, 0.0, 1.0)
         
         # 转换为numpy
