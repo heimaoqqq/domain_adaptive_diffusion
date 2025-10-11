@@ -714,11 +714,15 @@ class OfficialADMTrainer:
         # FP16 Scaler
         self.scaler = GradScaler() if self.use_fp16 else None
         
-        # 设置数据加载器（确保batch_size类型正确）
+        # 设置数据加载器（使用现有的data_loader.py）
         from utils import create_dataloaders
         self.train_loader, self.val_loader = create_dataloaders(
-            self.config,
-            batch_size=int(config['training']['batch_size'])
+            data_path=config['data']['latent_path'],
+            phase='pretrain',  # 使用pretrain模式（不需要domain balance）
+            batch_size=int(config['training']['batch_size']),
+            num_workers=4,
+            augmentation=False,  # 不使用数据增强
+            device=device
         )
         
         self.global_step = 0
