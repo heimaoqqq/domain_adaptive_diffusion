@@ -86,6 +86,14 @@ def main():
     model_args = args_to_dict(args, model_and_diffusion_defaults_vae().keys())
     model_args['image_size'] = latent_size  # 覆盖为latent尺寸
     
+    # 设置DDIM的时间步重采样
+    if args.use_ddim:
+        # DDIM使用更少的步数，通过timestep_respacing参数控制
+        model_args['timestep_respacing'] = str(args.ddim_steps)
+        logger.log(f"使用DDIM采样，步数: {args.ddim_steps}")
+    else:
+        logger.log("使用DDPM采样，完整1000步")
+    
     model, diffusion = create_model_and_diffusion_vae(**model_args)
     
     # 加载模型权重
