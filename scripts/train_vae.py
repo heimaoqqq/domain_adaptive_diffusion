@@ -143,6 +143,9 @@ def main():
         schedule_sampler=schedule_sampler,
         weight_decay=args.weight_decay,
         lr_anneal_steps=args.lr_anneal_steps,
+        # 新增：自动样本生成
+        auto_sample=args.auto_sample,
+        vae_model_path=args.vae_model_path,
     ).run_loop()
 
 
@@ -174,6 +177,9 @@ def create_argparser():
         
         # 日志
         log_dir="",
+        
+        # 自动样本生成（新增）
+        auto_sample=True,  # 是否在每个checkpoint自动生成样本
     )
     
     # 添加模型和扩散默认参数
