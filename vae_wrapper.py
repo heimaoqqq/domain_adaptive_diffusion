@@ -129,42 +129,12 @@ class VAEInterface:
             raise ImportError(f"无法导入KL_VAE，请检查文件结构和依赖: {e}")
     
     def _create_dummy_vae(self):
-        """创建模拟VAE用于测试"""
-        class DummyVAE(nn.Module):
-            def __init__(self, scale_factor=0.18215):
-                super().__init__()
-                self.encoder = nn.Conv2d(3, 4, 1)  # 简单1x1卷积
-                self.decoder = nn.Conv2d(4, 3, 1)
-                self.scale_factor = scale_factor
-                
-            def encode(self, x):
-                """模拟编码"""
-                # 简单下采样4x
-                B, C, H, W = x.shape
-                x = nn.functional.interpolate(x, size=(H//4, W//4), mode='bilinear')
-                return self.encoder(x)
-            
-            def decode(self, z):
-                """模拟解码"""
-                # 简单上采样4x
-                x = self.decoder(z)
-                H, W = x.shape[2] * 4, x.shape[3] * 4
-                x = nn.functional.interpolate(x, size=(H, W), mode='bilinear')
-                return torch.sigmoid(x)
-                
-            def encode_images(self, images):
-                """兼容KL_VAE的encode_images接口"""
-                latents = self.encode(images)
-                return latents * self.scale_factor
-                
-            def decode_latents(self, latents):
-                """兼容KL_VAE的decode_latents接口"""
-                latents = latents / self.scale_factor
-                return self.decode(latents)
-        
-        self.vae = DummyVAE(self.scale_factor).to(self.device)
-        self.vae.eval()
-        print("✓ 创建模拟VAE（仅用于测试）")
+        """不再支持模拟VAE"""
+        raise RuntimeError(
+            "无法加载VAE模型！模拟VAE会破坏训练效果。\n"
+            "请提供有效的VAE权重文件路径。\n"
+            "对于Kaggle环境，使用: /kaggle/input/kl-vae-best-pt/kl_vae_best.pt"
+        )
     
     def encode_batch(self, images):
         """
@@ -226,17 +196,28 @@ class VAEInterface:
         # KL_VAE下采样8x (256->32)
         return image_size // 8
     
-    def test_roundtrip(self, image_size=64):
+    def test_roundtrip(self, image_size=64, use_real_image=True):
         """
         测试编码-解码往返
         
         Args:
             image_size: 测试图像尺寸
+            use_real_image: 是否使用真实微多普勒图像
         """
         print(f"\n测试VAE往返 (size={image_size})...")
         
-        # 创建测试图像
-        test_image = torch.rand(1, 3, image_size, image_size).to(self.device)
+        # 创建或加载测试图像
+        if use_real_image:
+            # 必须加载真实微多普勒图像
+            test_image = self._get_real_test_image(image_size)
+            if test_image is None:
+                raise RuntimeError(
+                    "无法加载真实微多普勒图像进行测试！\n"
+                    "请确保数据集路径正确。\n"
+                    "预期路径之一: dataset/organized_gait_dataset/Normal_free/"
+                )
+        else:
+            raise ValueError("VAE测试必须使用真实图像(use_real_image=True)")
         print(f"输入图像: {test_image.shape}, 范围: [{test_image.min():.2f}, {test_image.max():.2f}]")
         
         # 编码
@@ -252,22 +233,48 @@ class VAEInterface:
         mse = ((test_image - reconstructed) ** 2).mean()
         print(f"重建误差 (MSE): {mse:.4f}")
         
-        return mse < 0.1  # 合理的重建误差阈值
+        # 对真实图像，MSE应该很小；对随机图像，MSE会较大
+        threshold = 0.01 if use_real_image else 0.25
+        return mse < threshold
+    
+    def _get_real_test_image(self, image_size):
+        """获取真实的微多普勒测试图像"""
+        from pathlib import Path
+        from PIL import Image
+        import numpy as np
+        
+        # 查找数据集
+        dataset_dirs = [
+            Path("dataset/organized_gait_dataset/Normal_free"),
+            Path("/kaggle/input/organized-gait-dataset/Normal_free"),
+            Path("G:/VA-VAE/dataset/organized_gait_dataset/Normal_free"),
+        ]
+        
+        for data_dir in dataset_dirs:
+            if data_dir.exists():
+                # 获取第一个用户的第一张图像
+                user_dirs = sorted([d for d in data_dir.iterdir() if d.is_dir()])
+                if user_dirs:
+                    images = list(user_dirs[0].glob("*.jpg"))
+                    if images:
+                        # 加载并预处理图像
+                        pil_img = Image.open(images[0]).convert("RGB")
+                        pil_img = pil_img.resize((image_size, image_size), Image.LANCZOS)
+                        img_array = np.array(pil_img).astype(np.float32) / 255.0
+                        img_tensor = torch.from_numpy(img_array).permute(2, 0, 1).unsqueeze(0).to(self.device)
+                        print(f"  加载真实图像: {images[0].name}")
+                        return img_tensor
+        
+        return None
 
 
 def test_vae_interface():
-    """测试VAE接口"""
-    print("=" * 60)
-    print("测试VAE接口")
-    print("=" * 60)
-    
-    # 创建接口
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    vae = VAEInterface(device=device)
-    
-    # 测试编码
-    print("\n1. 测试批量编码")
-    images = torch.rand(4, 3, 64, 64).to(device)
+    """测试VAE接口 - 废弃，不应使用随机数据测试"""
+    raise DeprecationWarning(
+        "test_vae_interface已废弃！\n"
+        "测试应该使用真实数据，不应使用随机生成的图像。\n"
+        "请运行 diagnose_vae_reconstruction.py 进行正确的测试。"
+    )
     latents = vae.encode_batch(images)
     print(f"✓ 编码成功: {images.shape} -> {latents.shape}")
     
