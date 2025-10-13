@@ -11,19 +11,37 @@ import os
 import sys
 
 # 添加父目录到路径
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+sys.path.insert(0, parent_dir)
 
-from guided_diffusion_vae import dist_util, logger
-from guided_diffusion_vae.image_datasets_vae import load_data_vae
-from guided_diffusion_vae.resample import create_named_schedule_sampler
-from guided_diffusion_vae.script_util_vae import (
-    model_and_diffusion_defaults_vae,
-    create_model_and_diffusion_vae,
-    args_to_dict,
-    add_dict_to_argparser,
-)
-from guided_diffusion_vae.train_util import TrainLoop
-from guided_diffusion_vae.vae_wrapper import VAEInterface
+# 尝试不同的导入方式
+try:
+    from guided_diffusion_vae import dist_util, logger
+    from guided_diffusion_vae.image_datasets_vae import load_data_vae
+    from guided_diffusion_vae.resample import create_named_schedule_sampler
+    from guided_diffusion_vae.script_util_vae import (
+        model_and_diffusion_defaults_vae,
+        create_model_and_diffusion_vae,
+        args_to_dict,
+        add_dict_to_argparser,
+    )
+    from guided_diffusion_vae.train_util import TrainLoop
+    from guided_diffusion_vae.vae_wrapper import VAEInterface
+except ImportError:
+    # 如果上面失败，尝试直接导入
+    sys.path.insert(0, os.path.dirname(parent_dir))
+    import dist_util, logger
+    from image_datasets_vae import load_data_vae
+    from resample import create_named_schedule_sampler
+    from script_util_vae import (
+        model_and_diffusion_defaults_vae,
+        create_model_and_diffusion_vae,
+        args_to_dict,
+        add_dict_to_argparser,
+    )
+    from train_util import TrainLoop
+    from vae_wrapper import VAEInterface
 
 
 def main():
