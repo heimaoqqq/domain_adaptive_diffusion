@@ -11,7 +11,10 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 import os
 
-from vae_wrapper import VAEInterface
+try:
+    from vae_wrapper import VAEInterface
+except ImportError:
+    from .vae_wrapper import VAEInterface
 
 
 def load_data_vae(
@@ -263,9 +266,11 @@ def test_data_loading():
     data_dir = "dataset/organized_gait_dataset/Normal_free"  # 使用一个类别测试
     
     if not os.path.exists(data_dir):
-        print(f"⚠️ 测试数据目录不存在: {data_dir}")
-        print("   使用模拟数据")
-        return
+        raise FileNotFoundError(
+            f"数据目录不存在: {data_dir}\n"
+            "请提供有效的数据集路径！\n"
+            "对于Kaggle: /kaggle/input/organized-gait-dataset"
+        )
     
     # 创建VAE接口
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
