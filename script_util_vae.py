@@ -25,15 +25,15 @@ def model_and_diffusion_defaults_vae():
     主要改动：通道数从3改为4
     """
     return dict(
-        # 模型架构
-        image_size=64,
-        num_channels=128,  # 基础通道数（小模型）
-        num_res_blocks=2,   # 残差块数量
-        num_heads=4,
+        # 模型架构 - 为Latent空间优化
+        image_size=256,  # 原始图像尺寸（会被转换为latent_size=32）
+        num_channels=256,  # 增加基础通道数（从128->256）用于latent
+        num_res_blocks=3,   # 增加残差块数量（从2->3）提升容量
+        num_heads=8,       # 增加注意力头数（从4->8）
         num_heads_upsample=-1,
         num_head_channels=32,
-        attention_resolutions="32,16,8",  # 注意力分辨率
-        channel_mult="",  # 会根据image_size自动设置
+        attention_resolutions="16,8,4",  # 适合32x32 latent的注意力分辨率
+        channel_mult="",  # 会根据latent_size自动设置
         dropout=0.1,
         class_cond=True,  # 使用类别条件
         use_checkpoint=False,
@@ -122,7 +122,7 @@ def create_model_and_diffusion_vae(
 
 
 def create_model_vae(
-    image_size,
+    image_size,  # 注意：这里实际上应该传入latent_size（如32），而不是原始图像尺寸
     num_channels,
     num_res_blocks,
     channel_mult="",
@@ -143,7 +143,11 @@ def create_model_vae(
 ):
     """
     创建VAE版本的UNet模型
-    主要改动：输入输出通道数
+    
+    重要：image_size参数应该是VAE的latent尺寸（如32），而不是原始图像尺寸（如256）
+    这个参数会在train_vae.py中被覆盖为latent_size
+    
+    主要改动：输入输出通道数从3改为4
     """
     
     # 自动设置channel_mult
@@ -157,7 +161,7 @@ def create_model_vae(
         elif image_size == 64:
             channel_mult = (1, 2, 3, 4)
         elif image_size == 32:
-            channel_mult = (1, 2, 2, 2)
+            channel_mult = (1, 2, 3, 4)  # 更渐进的通道增长，适合latent训练
         elif image_size == 16:  # VAE latent空间 (128->16)
             channel_mult = (1, 2, 2)
         elif image_size == 8:   # VAE latent空间 (64->8)
