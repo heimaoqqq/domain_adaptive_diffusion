@@ -42,25 +42,9 @@ def diagnose_vae():
     print("\n1. 测试真实微多普勒图像")
     test_real_microdoppler_images(vae, output_dir)
     
-    # 测试不同的归一化方式
-    print("\n2. 测试不同的输入归一化")
-    
-    # 创建测试图像 (模拟真实的微多普勒图像)
-    test_img_raw = torch.rand(1, 3, 256, 256).to(device)
-    
-    # 测试[0, 1]范围 - 保存对比图
-    print("\n- 输入范围 [0, 1]:")
-    recon_01 = test_reconstruction_with_save(vae, test_img_raw, "[0, 1]范围", 
-                                            output_dir / "test_range_0_1.png")
-    
-    # 测试[-1, 1]范围
-    print("\n- 输入范围 [-1, 1]:")
-    test_img_centered = test_img_raw * 2 - 1
-    test_reconstruction(vae, test_img_centered, "[-1, 1]范围")
-    
-    # 分析VAE内部行为
-    print("\n3. 分析VAE编码/解码细节")
-    analyze_vae_internals(vae, test_img_raw)
+    # 测试更多真实图像的统计
+    print("\n2. 分析真实数据集的重建质量")
+    analyze_dataset_reconstruction(vae, output_dir)
     
     print(f"\n✅ 分析完成！对比图保存在 {output_dir} 目录")
         
@@ -201,7 +185,7 @@ def test_real_microdoppler_images(vae, output_dir):
         return
     
     # 获取一些示例图像
-    subdirs = ["Normal_free", "Bag_free", "Backpack_free"]
+    subdirs = ["Normal_free", "Normal_line", "Bag_free", "Backpack_free"]
     test_images = []
     
     for subdir in subdirs:
@@ -235,6 +219,105 @@ def test_real_microdoppler_images(vae, output_dir):
         # 测试重建
         save_path = output_dir / f"real_{gait_type}.png"
         test_reconstruction_with_save(vae, img_tensor, f"真实图像-{gait_type}", save_path)
+
+def analyze_dataset_reconstruction(vae, output_dir):
+    """分析整个数据集的重建质量"""
+    
+    # 查找数据集目录
+    dataset_dirs = [
+        Path("dataset/organized_gait_dataset"),
+        Path("/kaggle/input/organized-gait-dataset"),
+        Path("G:/VA-VAE/dataset/organized_gait_dataset")
+    ]
+    
+    dataset_dir = None
+    for d in dataset_dirs:
+        if d.exists():
+            dataset_dir = d
+            break
+    
+    if dataset_dir is None:
+        print("  未找到数据集目录")
+        return
+    
+    # 统计所有步态类型
+    all_mse = []
+    gait_stats = {}
+    
+    subdirs = ["Normal_free", "Normal_line", "Bag_free", "Bag_line", 
+               "Backpack_free", "Backpack_line", "Bag_Phone_free", "Bag_Phone_line"]
+    
+    for subdir in subdirs:
+        subdir_path = dataset_dir / subdir
+        if not subdir_path.exists():
+            continue
+        
+        print(f"\n  分析 {subdir}...")
+        subdir_mse = []
+        
+        # 采样测试（每个用户取2张图）
+        user_dirs = sorted([d for d in subdir_path.iterdir() if d.is_dir()])[:5]  # 测试前5个用户
+        
+        for user_dir in user_dirs:
+            images = list(user_dir.glob("*.jpg"))[:2]  # 每个用户取2张
+            
+            for img_path in images:
+                # 加载和预处理
+                pil_img = Image.open(img_path).convert("RGB")
+                pil_img = pil_img.resize((256, 256), Image.LANCZOS)
+                img_array = np.array(pil_img).astype(np.float32) / 255.0
+                img_tensor = torch.from_numpy(img_array).permute(2, 0, 1).unsqueeze(0).to(vae.device)
+                
+                # 计算重建误差
+                with torch.no_grad():
+                    latent = vae.encode_batch(img_tensor)
+                    recon = vae.decode_batch(latent)
+                    mse = ((img_tensor - recon) ** 2).mean().item()
+                    subdir_mse.append(mse)
+                    all_mse.append(mse)
+        
+        if subdir_mse:
+            avg_mse = np.mean(subdir_mse)
+            std_mse = np.std(subdir_mse)
+            gait_stats[subdir] = {"avg": avg_mse, "std": std_mse, "samples": len(subdir_mse)}
+            print(f"    MSE: {avg_mse:.5f} ± {std_mse:.5f} (n={len(subdir_mse)})")
+    
+    # 总体统计
+    if all_mse:
+        print("\n  📊 总体统计:")
+        print(f"    平均MSE: {np.mean(all_mse):.5f}")
+        print(f"    标准差: {np.std(all_mse):.5f}")
+        print(f"    最小MSE: {np.min(all_mse):.5f}")
+        print(f"    最大MSE: {np.max(all_mse):.5f}")
+        print(f"    中位数: {np.median(all_mse):.5f}")
+        print(f"    样本数: {len(all_mse)}")
+        
+        # 保存统计结果
+        stats_path = output_dir / "reconstruction_stats.txt"
+        with open(stats_path, 'w') as f:
+            f.write("VAE重建质量统计\n")
+            f.write("="*50 + "\n\n")
+            f.write("各步态类型统计:\n")
+            for gait, stats in gait_stats.items():
+                f.write(f"{gait}: MSE={stats['avg']:.5f} ± {stats['std']:.5f} (n={stats['samples']})\n")
+            f.write(f"\n总体统计:\n")
+            f.write(f"平均MSE: {np.mean(all_mse):.5f}\n")
+            f.write(f"标准差: {np.std(all_mse):.5f}\n")
+            f.write(f"最小MSE: {np.min(all_mse):.5f}\n")
+            f.write(f"最大MSE: {np.max(all_mse):.5f}\n")
+            f.write(f"中位数: {np.median(all_mse):.5f}\n")
+            f.write(f"样本数: {len(all_mse)}\n")
+        
+        print(f"\n  ✅ 统计结果已保存到 {stats_path}")
+        
+        # 结论
+        avg_mse = np.mean(all_mse)
+        if avg_mse < 0.01:
+            print("\n  🎯 结论: VAE重建质量优秀！MSE < 0.01，完全适合扩散模型训练")
+        elif avg_mse < 0.05:
+            print("\n  ✅ 结论: VAE重建质量良好，MSE < 0.05，适合扩散模型训练")
+        else:
+            print("\n  ⚠️ 结论: VAE重建质量一般，可能需要调整")
 
 if __name__ == "__main__":
     diagnose_vae()
