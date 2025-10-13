@@ -149,17 +149,25 @@ def main():
         images = images.permute(0, 2, 3, 1).contiguous()
         
         # 收集样本（分布式训练时）
-        gathered_samples = [th.zeros_like(images) for _ in range(dist.get_world_size())]
-        dist.all_gather(gathered_samples, images)
-        all_images.extend([sample.cpu().numpy() for sample in gathered_samples])
+        if dist.is_initialized() and dist.get_world_size() > 1:
+            gathered_samples = [th.zeros_like(images) for _ in range(dist.get_world_size())]
+            dist.all_gather(gathered_samples, images)
+            all_images.extend([sample.cpu().numpy() for sample in gathered_samples])
+        else:
+            # 单GPU模式
+            all_images.extend([images.cpu().numpy()])
         
         # 收集标签
         if args.class_cond:
-            gathered_labels = [
-                th.zeros_like(classes) for _ in range(dist.get_world_size())
-            ]
-            dist.all_gather(gathered_labels, classes)
-            all_labels.extend([labels.cpu().numpy() for labels in gathered_labels])
+            if dist.is_initialized() and dist.get_world_size() > 1:
+                gathered_labels = [
+                    th.zeros_like(classes) for _ in range(dist.get_world_size())
+                ]
+                dist.all_gather(gathered_labels, classes)
+                all_labels.extend([labels.cpu().numpy() for labels in gathered_labels])
+            else:
+                # 单GPU模式
+                all_labels.extend([classes.cpu().numpy()])
         
         logger.log(f"已创建 {len(all_images) * args.batch_size} 个样本")
 
@@ -172,7 +180,7 @@ def main():
         label_arr = label_arr[: args.num_samples]
 
     # 保存样本
-    if dist.get_rank() == 0:
+    if not dist.is_initialized() or dist.get_rank() == 0:
         # 保存为单独的图像文件
         if args.save_images_separately:
             logger.log("保存单独的图像文件...")
@@ -202,7 +210,8 @@ def main():
             logger.log("创建样本网格...")
             create_sample_grid(arr[:min(64, len(arr))], os.path.join(sample_dir, "sample_grid.png"))
 
-    dist.barrier()
+    if dist.is_initialized():
+        dist.barrier()
     logger.log("采样完成！")
 
 
