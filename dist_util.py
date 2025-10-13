@@ -6,10 +6,40 @@ import io
 import os
 import socket
 
-import blobfile as bf
-from mpi4py import MPI
+# Try to import blobfile, but make it optional
+try:
+    import blobfile as bf
+except ImportError:
+    # Fallback to standard file operations
+    class bf:
+        @staticmethod
+        def BlobFile(path, mode):
+            return open(path, mode)
+        
+        @staticmethod
+        def exists(path):
+            return os.path.exists(path)
+
 import torch as th
 import torch.distributed as dist
+
+# Try to import MPI, but make it optional
+try:
+    from mpi4py import MPI
+    MPI_AVAILABLE = True
+except ImportError:
+    MPI = None
+    MPI_AVAILABLE = False
+    # Create a dummy MPI object for single GPU training
+    class DummyMPI:
+        class COMM_WORLD:
+            @staticmethod
+            def Get_rank():
+                return 0
+            @staticmethod
+            def Get_size():
+                return 1
+    MPI = DummyMPI()
 
 # Change this to reflect your cluster layout.
 # The GPU for a given rank is (rank % GPUS_PER_NODE).
@@ -24,6 +54,23 @@ def setup_dist():
     """
     if dist.is_initialized():
         return
+    
+    # Single GPU mode when MPI is not available
+    if not MPI_AVAILABLE:
+        os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+        os.environ["MASTER_ADDR"] = "localhost"
+        os.environ["RANK"] = "0"
+        os.environ["WORLD_SIZE"] = "1"
+        os.environ["MASTER_PORT"] = str(_find_free_port())
+        
+        backend = "gloo" if not th.cuda.is_available() else "nccl"
+        
+        # For single GPU, we might not need to initialize process group
+        if int(os.environ.get("WORLD_SIZE", 1)) > 1:
+            dist.init_process_group(backend=backend, init_method="env://")
+        return
+    
+    # Original MPI-based setup
     os.environ["CUDA_VISIBLE_DEVICES"] = f"{MPI.COMM_WORLD.Get_rank() % GPUS_PER_NODE}"
 
     comm = MPI.COMM_WORLD
@@ -55,6 +102,13 @@ def load_state_dict(path, **kwargs):
     """
     Load a PyTorch file without redundant fetches across MPI ranks.
     """
+    # Single GPU mode - just load directly
+    if not MPI_AVAILABLE:
+        with bf.BlobFile(path, "rb") as f:
+            data = f.read()
+        return th.load(io.BytesIO(data), **kwargs)
+    
+    # Original MPI-based loading
     chunk_size = 2 ** 30  # MPI has a relatively small size limit
     if MPI.COMM_WORLD.Get_rank() == 0:
         with bf.BlobFile(path, "rb") as f:
