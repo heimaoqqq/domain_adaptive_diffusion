@@ -303,7 +303,8 @@ class TrainLoop:
             "--ddim_steps", "50",  # 快速生成（原50步）
             "--image_size", "256",
             "--class_cond", "True",  # 随机类别条件
-            "--out_path", f"samples/step_{current_step:06d}.npz",
+            "--sample_dir", "samples",  # 输出目录
+            "--save_images_separately", "True",  # 保存单独的图像文件
         ]
         
         try:
