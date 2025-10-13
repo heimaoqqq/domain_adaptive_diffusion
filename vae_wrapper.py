@@ -223,8 +223,8 @@ class VAEInterface:
         Returns:
             latent_size: latent空间尺寸
         """
-        # VAE通常下采样4x
-        return image_size // 4
+        # KL_VAE下采样8x (256->32)
+        return image_size // 8
     
     def test_roundtrip(self, image_size=64):
         """
