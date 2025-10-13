@@ -44,6 +44,8 @@ class TrainLoop:
         schedule_sampler=None,
         weight_decay=0.0,
         lr_anneal_steps=0,
+        auto_sample=True,  # 新增：是否自动生成样本
+        vae_model_path=None,  # 新增：VAE模型路径（用于生成）
     ):
         self.model = model
         self.diffusion = diffusion
@@ -64,6 +66,10 @@ class TrainLoop:
         self.schedule_sampler = schedule_sampler or UniformSampler(diffusion)
         self.weight_decay = weight_decay
         self.lr_anneal_steps = lr_anneal_steps
+        
+        # 新增：自动样本生成
+        self.auto_sample = auto_sample
+        self.vae_model_path = vae_model_path
 
         self.step = 0
         self.resume_step = 0
@@ -161,6 +167,9 @@ class TrainLoop:
                 logger.dumpkvs()
             if self.step % self.save_interval == 0:
                 self.save()
+                # 自动生成样本（新增）- 直接调用sample_vae.py
+                if self.step > 0 and self.auto_sample:
+                    self.run_sample_script()
                 # Run for a finite amount of time in integration tests.
                 if os.environ.get("DIFFUSION_TRAINING_TEST", "") and self.step > 0:
                     return
@@ -254,6 +263,62 @@ class TrainLoop:
 
         # 单GPU模式，不需要barrier
         # dist.barrier()
+    
+    def run_sample_script(self):
+        """调用sample_vae.py生成样本"""
+        if not self.vae_model_path:
+            logger.log("警告: 未提供VAE模型路径，跳过样本生成")
+            logger.log(f"  vae_model_path = {self.vae_model_path}")
+            return
+        
+        logger.log(f"使用VAE模型: {self.vae_model_path}")
+        
+        current_step = self.step + self.resume_step
+        logger.log(f"生成样本 (step {current_step})...")
+        
+        # 确保样本目录存在
+        os.makedirs("samples", exist_ok=True)
+        
+        # 构建命令
+        import subprocess
+        
+        # 获取当前模型路径
+        model_path = bf.join(get_blob_logdir(), f"model{current_step:06d}.pt")
+        
+        # 使用EMA模型（如果有）
+        if len(self.ema_params) > 0:
+            ema_model_path = bf.join(get_blob_logdir(), f"ema_0.9999_{current_step:06d}.pt")
+            if os.path.exists(ema_model_path):
+                model_path = ema_model_path
+                logger.log("使用EMA模型生成样本")
+        
+        # 构建sample_vae.py的调用命令
+        cmd = [
+            "python", "scripts/sample_vae.py",
+            "--model_path", model_path,
+            "--vae_model_path", self.vae_model_path,
+            "--num_samples", "2",  # 只生成2张供参考
+            "--batch_size", "2",
+            "--use_ddim", "True",
+            "--ddim_steps", "50",  # 快速生成（原50步）
+            "--image_size", "256",
+            "--class_cond", "True",  # 随机类别条件
+            "--out_path", f"samples/step_{current_step:06d}.npz",
+        ]
+        
+        try:
+            # 运行生成脚本
+            logger.log(f"运行命令: {' '.join(cmd)}")
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            
+            if result.returncode == 0:
+                logger.log(f"✅ 样本生成成功: samples/step_{current_step:06d}.npz")
+            else:
+                logger.log(f"⚠️ 样本生成失败: {result.stderr}")
+        except subprocess.TimeoutExpired:
+            logger.log("⚠️ 样本生成超时（5分钟）")
+        except Exception as e:
+            logger.log(f"⚠️ 样本生成出错: {e}")
 
 
 def parse_resume_step_from_filename(filename):
