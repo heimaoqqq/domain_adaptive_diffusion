@@ -16,17 +16,33 @@ import torch.distributed as dist
 from PIL import Image
 
 # 添加父目录到路径
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+sys.path.insert(0, parent_dir)
 
-from guided_diffusion_vae import dist_util, logger
-from guided_diffusion_vae.script_util_vae import (
-    NUM_CLASSES,
-    model_and_diffusion_defaults_vae,
-    create_model_and_diffusion_vae,
-    add_dict_to_argparser,
-    args_to_dict,
-)
-from guided_diffusion_vae.vae_wrapper import VAEInterface
+# 尝试不同的导入方式
+try:
+    from guided_diffusion_vae import dist_util, logger
+    from guided_diffusion_vae.script_util_vae import (
+        NUM_CLASSES,
+        model_and_diffusion_defaults_vae,
+        create_model_and_diffusion_vae,
+        add_dict_to_argparser,
+        args_to_dict,
+    )
+    from guided_diffusion_vae.vae_wrapper import VAEInterface
+except ImportError:
+    # 如果上面失败，尝试直接导入
+    sys.path.insert(0, os.path.dirname(parent_dir))
+    import dist_util, logger
+    from script_util_vae import (
+        NUM_CLASSES,
+        model_and_diffusion_defaults_vae,
+        create_model_and_diffusion_vae,
+        add_dict_to_argparser,
+        args_to_dict,
+    )
+    from vae_wrapper import VAEInterface
 
 
 def main():
