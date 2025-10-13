@@ -132,6 +132,10 @@ def sync_params(params):
     """
     Synchronize a sequence of Tensors across ranks from rank 0.
     """
+    # Skip sync in single GPU mode
+    if not dist.is_initialized():
+        return
+    
     for p in params:
         with th.no_grad():
             dist.broadcast(p, 0)
