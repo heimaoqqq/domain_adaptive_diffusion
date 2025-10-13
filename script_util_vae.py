@@ -49,6 +49,7 @@ def model_and_diffusion_defaults_vae():
         sigma_small=False,
         rescale_timesteps=False,
         rescale_learned_sigmas=False,
+        timestep_respacing="",  # DDIM时间步重采样
         
         # VAE特定参数
         use_vae=True,
@@ -72,6 +73,7 @@ def create_model_and_diffusion_vae(
     noise_schedule,
     rescale_timesteps,
     rescale_learned_sigmas,
+    timestep_respacing,
     sigma_small,
     use_checkpoint,
     use_scale_shift_norm,
@@ -113,6 +115,7 @@ def create_model_and_diffusion_vae(
         noise_schedule=noise_schedule,
         rescale_timesteps=rescale_timesteps,
         rescale_learned_sigmas=rescale_learned_sigmas,
+        timestep_respacing=timestep_respacing,
     )
     
     return model, diffusion
