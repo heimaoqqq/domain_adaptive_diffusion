@@ -155,17 +155,25 @@ def create_model_vae(
             channel_mult = (1, 2, 3, 4)
         elif image_size == 32:
             channel_mult = (1, 2, 2, 2)
-        elif image_size == 16:  # VAE latent空间 (64->16)
+        elif image_size == 16:  # VAE latent空间 (128->16)
             channel_mult = (1, 2, 2)
+        elif image_size == 8:   # VAE latent空间 (64->8)
+            channel_mult = (1, 2)
         else:
             raise ValueError(f"不支持的图像尺寸: {image_size}")
     else:
         channel_mult = tuple(int(ch_mult) for ch_mult in channel_mult.split(","))
     
-    # 处理注意力分辨率
-    attention_ds = []
-    for res in attention_resolutions.split(","):
-        attention_ds.append(image_size // int(res))
+    # 处理注意力分辨率 - 根据图像尺寸调整
+    if image_size <= 8:
+        # 对于很小的尺寸，只在最低分辨率使用注意力
+        attention_ds = [1]
+    else:
+        attention_ds = []
+        for res in attention_resolutions.split(","):
+            att_ds = image_size // int(res)
+            if att_ds > 0:  # 只添加有效的注意力层
+                attention_ds.append(att_ds)
     
     # 确定输入输出通道
     if use_vae:
