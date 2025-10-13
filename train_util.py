@@ -67,7 +67,11 @@ class TrainLoop:
 
         self.step = 0
         self.resume_step = 0
-        self.global_batch = self.batch_size * dist.get_world_size()
+        # Handle single GPU mode
+        try:
+            self.global_batch = self.batch_size * dist.get_world_size()
+        except:
+            self.global_batch = self.batch_size  # Single GPU
 
         self.sync_cuda = th.cuda.is_available()
 
@@ -105,11 +109,14 @@ class TrainLoop:
                 find_unused_parameters=False,
             )
         else:
-            if dist.get_world_size() > 1:
-                logger.warn(
-                    "Distributed training requires CUDA. "
-                    "Gradients will not be synchronized properly!"
-                )
+            try:
+                if dist.get_world_size() > 1:
+                    logger.warn(
+                        "Distributed training requires CUDA. "
+                        "Gradients will not be synchronized properly!"
+                    )
+            except:
+                pass  # Single GPU mode
             self.use_ddp = False
             self.ddp_model = self.model
 
