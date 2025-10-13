@@ -82,9 +82,11 @@ def main():
     logger.log(f"Latent尺寸: {latent_size}x{latent_size}")
 
     logger.log("创建模型和扩散过程...")
-    model, diffusion = create_model_and_diffusion_vae(
-        **args_to_dict(args, model_and_diffusion_defaults_vae().keys())
-    )
+    # 重要：使用latent尺寸而不是图像尺寸
+    model_args = args_to_dict(args, model_and_diffusion_defaults_vae().keys())
+    model_args['image_size'] = latent_size  # 覆盖为latent尺寸
+    
+    model, diffusion = create_model_and_diffusion_vae(**model_args)
     
     # 加载模型权重
     logger.log(f"加载模型权重: {args.model_path}")
