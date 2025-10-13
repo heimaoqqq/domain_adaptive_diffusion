@@ -7,6 +7,8 @@ import sys
 import os
 from pathlib import Path
 import numpy as np
+from PIL import Image
+import matplotlib.pyplot as plt
 
 # 添加项目路径
 sys.path.append(str(Path(__file__).parent))
@@ -32,37 +34,35 @@ def diagnose_vae():
     print(f"  scale_factor: {vae.scale_factor}")
     print(f"  设备: {device}")
     
+    # 创建输出目录
+    output_dir = Path("vae_reconstruction_analysis")
+    output_dir.mkdir(exist_ok=True)
+    
+    # 测试真实的微多普勒图像
+    print("\n1. 测试真实微多普勒图像")
+    test_real_microdoppler_images(vae, output_dir)
+    
     # 测试不同的归一化方式
-    print("\n1. 测试不同的输入归一化")
+    print("\n2. 测试不同的输入归一化")
     
     # 创建测试图像 (模拟真实的微多普勒图像)
     test_img_raw = torch.rand(1, 3, 256, 256).to(device)
     
-    # 测试[0, 1]范围
+    # 测试[0, 1]范围 - 保存对比图
     print("\n- 输入范围 [0, 1]:")
-    test_reconstruction(vae, test_img_raw, "[0, 1]范围")
+    recon_01 = test_reconstruction_with_save(vae, test_img_raw, "[0, 1]范围", 
+                                            output_dir / "test_range_0_1.png")
     
     # 测试[-1, 1]范围
     print("\n- 输入范围 [-1, 1]:")
     test_img_centered = test_img_raw * 2 - 1
     test_reconstruction(vae, test_img_centered, "[-1, 1]范围")
     
-    # 测试ImageNet标准化
-    print("\n- ImageNet标准化:")
-    mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to(device)
-    std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to(device)
-    test_img_imagenet = (test_img_raw - mean) / std
-    test_reconstruction(vae, test_img_imagenet, "ImageNet标准化")
-    
     # 分析VAE内部行为
-    print("\n2. 分析VAE编码/解码细节")
+    print("\n3. 分析VAE编码/解码细节")
     analyze_vae_internals(vae, test_img_raw)
     
-    # 测试真实数据范围
-    print("\n3. 测试真实数据范围模拟")
-    # 模拟微多普勒数据（通常有特定的值范围）
-    # 假设原始数据是uint8 [0, 255]，然后归一化到[0, 1]
-    test_real_data(vae)
+    print(f"\n✅ 分析完成！对比图保存在 {output_dir} 目录")
         
 def test_reconstruction(vae, image, name):
     """测试单个图像的重建"""
@@ -117,24 +117,124 @@ def analyze_vae_internals(vae, test_img):
         
         print(f"  解码输出范围: [{decoded.min():.3f}, {decoded.max():.3f}]")
         
-def test_real_data(vae):
-    """测试真实数据的典型范围"""
-    print("\n测试真实数据范围:")
+def test_reconstruction_with_save(vae, image, name, save_path):
+    """测试重建并保存对比图"""
+    print(f"  输入范围: [{image.min():.3f}, {image.max():.3f}]")
     
-    # 模拟从PIL Image加载的数据
-    # uint8 [0, 255] -> float32 [0, 1]
-    fake_uint8 = torch.randint(0, 256, (1, 3, 256, 256), dtype=torch.uint8)
-    fake_normalized = fake_uint8.float() / 255.0
-    fake_normalized = fake_normalized.to(vae.device)
+    # 编码
+    with torch.no_grad():
+        latent = vae.encode_batch(image)
+    print(f"  编码latent: shape={latent.shape}, mean={latent.mean():.4f}, std={latent.std():.4f}")
     
-    print("\n- 模拟真实图像 (uint8归一化):")
-    test_reconstruction(vae, fake_normalized, "真实数据模拟")
+    # 解码
+    with torch.no_grad():
+        recon = vae.decode_batch(latent)
     
-    # 测试不同的预处理
-    print("\n建议:")
-    print("  1. 确保输入图像在[0, 1]范围")
-    print("  2. 使用 image = image.float() / 255.0 进行归一化")
-    print("  3. 不要使用ImageNet标准化或[-1, 1]范围")
+    # 计算误差
+    image_clamped = torch.clamp(image, 0, 1)
+    recon_clamped = torch.clamp(recon, 0, 1)
+    mse = ((image_clamped - recon_clamped) ** 2).mean().item()
+    mae = (image_clamped - recon_clamped).abs().mean().item()
+    print(f"  重建误差: MSE={mse:.4f}, MAE={mae:.4f}")
+    
+    # 保存对比图
+    save_comparison_figure(image_clamped, recon_clamped, save_path, name, mse, mae)
+    
+    return recon_clamped
+
+def save_comparison_figure(original, reconstructed, save_path, title, mse, mae):
+    """保存对比图"""
+    # 转换为numpy并移到CPU
+    orig_np = original[0].cpu().numpy().transpose(1, 2, 0)
+    recon_np = reconstructed[0].cpu().numpy().transpose(1, 2, 0)
+    diff_np = np.abs(orig_np - recon_np)
+    
+    # 创建图形
+    fig, axes = plt.subplots(1, 4, figsize=(16, 4))
+    
+    # 原始图像
+    axes[0].imshow(orig_np)
+    axes[0].set_title('原始图像')
+    axes[0].axis('off')
+    
+    # 重建图像
+    axes[1].imshow(recon_np)
+    axes[1].set_title('重建图像')
+    axes[1].axis('off')
+    
+    # 差异图
+    im_diff = axes[2].imshow(diff_np, cmap='hot')
+    axes[2].set_title('绝对差异')
+    axes[2].axis('off')
+    plt.colorbar(im_diff, ax=axes[2], fraction=0.046)
+    
+    # 差异直方图
+    axes[3].hist(diff_np.flatten(), bins=50, edgecolor='black')
+    axes[3].set_title(f'差异分布\nMSE={mse:.4f}, MAE={mae:.4f}')
+    axes[3].set_xlabel('绝对差异')
+    axes[3].set_ylabel('像素数')
+    
+    plt.suptitle(f'{title} - VAE重建质量分析', fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  对比图已保存: {save_path}")
+
+def test_real_microdoppler_images(vae, output_dir):
+    """测试真实微多普勒图像"""
+    
+    # 查找数据集目录
+    dataset_dirs = [
+        Path("dataset/organized_gait_dataset"),
+        Path("/kaggle/input/organized-gait-dataset"),
+        Path("G:/VA-VAE/dataset/organized_gait_dataset")
+    ]
+    
+    dataset_dir = None
+    for d in dataset_dirs:
+        if d.exists():
+            dataset_dir = d
+            break
+    
+    if dataset_dir is None:
+        print("  未找到数据集目录，跳过真实图像测试")
+        return
+    
+    # 获取一些示例图像
+    subdirs = ["Normal_free", "Bag_free", "Backpack_free"]
+    test_images = []
+    
+    for subdir in subdirs:
+        subdir_path = dataset_dir / subdir
+        if subdir_path.exists():
+            # 获取第一个用户的第一张图像
+            user_dirs = sorted([d for d in subdir_path.iterdir() if d.is_dir()])
+            if user_dirs:
+                images = list(user_dirs[0].glob("*.jpg"))[:1]
+                if images:
+                    test_images.append((images[0], subdir))
+    
+    if not test_images:
+        print("  未找到测试图像")
+        return
+    
+    # 测试每张图像
+    for img_path, gait_type in test_images:
+        print(f"\n  测试 {gait_type} - {img_path.name}")
+        
+        # 加载图像
+        pil_img = Image.open(img_path).convert("RGB")
+        
+        # 调整到256x256
+        pil_img = pil_img.resize((256, 256), Image.LANCZOS)
+        
+        # 转换为tensor并归一化到[0, 1]
+        img_array = np.array(pil_img).astype(np.float32) / 255.0
+        img_tensor = torch.from_numpy(img_array).permute(2, 0, 1).unsqueeze(0).to(vae.device)
+        
+        # 测试重建
+        save_path = output_dir / f"real_{gait_type}.png"
+        test_reconstruction_with_save(vae, img_tensor, f"真实图像-{gait_type}", save_path)
 
 if __name__ == "__main__":
     diagnose_vae()
