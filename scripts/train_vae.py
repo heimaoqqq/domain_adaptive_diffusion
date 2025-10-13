@@ -73,6 +73,7 @@ def main():
     logger.log("创建VAE接口...")
     # 创建VAE接口
     device = dist_util.dev()
+    logger.log(f"VAE模型路径: {args.vae_model_path}")  # 调试输出
     vae_interface = VAEInterface(
         vae_path=args.vae_model_path,
         device=device
@@ -145,7 +146,7 @@ def main():
         lr_anneal_steps=args.lr_anneal_steps,
         # 新增：自动样本生成
         auto_sample=args.auto_sample,
-        vae_model_path=args.vae_model_path,
+        vae_model_path=args.vae_model_path,  # 确保传递VAE路径
     ).run_loop()
 
 
@@ -157,8 +158,12 @@ def create_argparser():
         cached_latents_dir="",     # 预编码latents目录
         random_flip=False,         # 不使用数据增强（微多普勒数据不适合）
         
-        # VAE参数
-        vae_model_path="/kaggle/input/kl-vae-best-pt/kl_vae_best.pt",
+        # VAE参数 - 自动选择本地或Kaggle路径
+        vae_model_path=(
+            "/kaggle/input/kl-vae-best-pt/kl_vae_best.pt"  # Kaggle路径
+            if os.path.exists("/kaggle/input/kl-vae-best-pt/kl_vae_best.pt")
+            else "vavae/kl_vae_best.pt"  # 本地路径
+        ),
         test_vae=True,  # 是否测试VAE
         
         # 训练参数
