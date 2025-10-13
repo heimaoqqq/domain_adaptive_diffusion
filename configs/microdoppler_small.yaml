@@ -1,0 +1,93 @@
+# 小模型配置 - 微多普勒数据集 (256x256)
+# 基于官方配置调整，适合31个用户的步态数据
+
+model:
+  # 图像尺寸
+  image_size: 256
+  
+  # 通道配置 - 适中的模型
+  num_channels: 128  # 基础通道数
+  num_res_blocks: 2   # 每个分辨率的残差块数
+  channel_mult: [1, 1, 2, 2, 4, 4]  # 256x256的标准配置
+  
+  # 注意力配置
+  attention_resolutions: [32, 16, 8]  # 在256/8=32, 256/16=16, 256/32=8分辨率使用注意力
+  num_heads: 4
+  num_head_channels: 32  # 官方是64，我们用32
+  
+  # 其他架构选项
+  dropout: 0.1
+  use_scale_shift_norm: true
+  resblock_updown: true
+  use_new_attention_order: true
+  use_checkpoint: false  # 内存充足时关闭，加快训练
+  
+  # VAE集成配置（新增）
+  in_channels: 4   # VAE latent是4通道，不是RGB的3
+  out_channels: 4  # 同样输出4通道
+  learn_sigma: false  # 简化训练，不学习方差
+
+diffusion:
+  # 扩散步数
+  steps: 1000
+  
+  # 噪声调度
+  noise_schedule: cosine  # cosine对小数据集更友好
+  
+  # Beta schedule参数
+  beta_start: 0.0001
+  beta_end: 0.02
+  
+  # 损失类型
+  loss_type: mse  # 简单MSE损失
+  
+  # 采样配置
+  timestep_respacing: ""  # 训练时使用全部步数
+  
+training:
+  # 批大小
+  batch_size: 8   # 256x256图像需要更小的batch以适应内存
+  microbatch: 2   # 梯度累积
+  
+  # 优化器
+  lr: 1e-4
+  weight_decay: 0.0
+  ema_rate: 0.9999
+  
+  # 训练周期
+  lr_anneal_steps: 0  # 不使用学习率退火
+  
+  # 日志和保存
+  log_interval: 10
+  save_interval: 1000
+  
+  # 混合精度
+  use_fp16: false  # 初期调试时关闭，稳定后可开启
+  fp16_scale_growth: 1e-3
+
+data:
+  # 数据路径
+  data_dir: ""  # 将在脚本中设置
+  
+  # 数据增强 - 完全不使用
+  random_flip: false  # 不使用水平翻转
+  random_crop: false  # 不使用随机裁剪
+  
+  # 类别条件
+  class_cond: true  # 31个用户类别
+  num_classes: 31
+
+# VAE配置（新增）
+vae:
+  model_path: "domain_adaptive_diffusion/vae/vae_model.pt"
+  scale_factor: 0.18215  # 标准缩放因子
+  
+# 推理配置
+sampling:
+  batch_size: 4       # 生成时的批大小（256x256需要较小batch）
+  num_samples: 31     # 每个类别生成一个样本
+  use_ddim: true      # 默认使用DDIM快速采样
+  ddim_steps: 50      # DDIM使用50步（比1000步快20倍）
+  clip_denoised: true # 裁剪去噪结果
+  classifier_scale: 0.0  # 不使用分类器引导
+
