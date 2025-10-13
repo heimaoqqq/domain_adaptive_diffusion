@@ -306,9 +306,11 @@ def test_model_creation():
     print(f"  - 扩散步数: {diffusion.num_timesteps}")
     
     # 测试前向传播（VAE latent输入）
+    # 警告：这只是架构验证，实际训练必须使用真实编码的latent！
+    print("\n⚠️ 注意: 使用随机数据仅用于验证模型架构，实际训练必须使用真实数据！")
     batch_size = 2
     latent_size = 16  # 64x64图像 -> 16x16 latent
-    x = torch.randn(batch_size, 4, latent_size, latent_size)  # 4通道latent
+    x = torch.randn(batch_size, 4, latent_size, latent_size)  # 仅用于架构测试
     t = torch.randint(0, 1000, (batch_size,))
     y = torch.randint(0, NUM_CLASSES, (batch_size,))
     
