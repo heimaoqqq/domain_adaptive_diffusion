@@ -80,10 +80,12 @@ def main():
     
     # 测试VAE
     if args.test_vae:
-        logger.log("测试VAE编码解码...")
-        success = vae_interface.test_roundtrip(args.image_size)
+        logger.log("测试VAE编码解码（使用真实微多普勒图像）...")
+        success = vae_interface.test_roundtrip(args.image_size, use_real_image=True)
         if not success:
             logger.log("警告: VAE往返测试误差较大")
+        else:
+            logger.log("✓ VAE测试通过，重建质量良好")
 
     # 先计算latent尺寸
     latent_size = vae_interface.get_latent_size(args.image_size)
@@ -150,7 +152,7 @@ def create_argparser():
         data_dir="",
         use_cached_latents=False,  # 默认不使用预编码（实时编码更灵活）
         cached_latents_dir="",     # 预编码latents目录
-        random_flip=True,          # 数据增强
+        random_flip=False,         # 不使用数据增强（微多普勒数据不适合）
         
         # VAE参数
         vae_model_path="/kaggle/input/kl-vae-best-pt/kl_vae_best.pt",
