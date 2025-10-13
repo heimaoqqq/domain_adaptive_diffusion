@@ -29,19 +29,34 @@ try:
     from guided_diffusion_vae.train_util import TrainLoop
     from guided_diffusion_vae.vae_wrapper import VAEInterface
 except ImportError:
-    # 如果上面失败，尝试直接导入
-    sys.path.insert(0, os.path.dirname(parent_dir))
-    import dist_util, logger
-    from image_datasets_vae import load_data_vae
-    from resample import create_named_schedule_sampler
-    from script_util_vae import (
-        model_and_diffusion_defaults_vae,
-        create_model_and_diffusion_vae,
-        args_to_dict,
-        add_dict_to_argparser,
-    )
-    from train_util import TrainLoop
-    from vae_wrapper import VAEInterface
+    # 如果上面失败，尝试直接导入（对于Kaggle环境）
+    try:
+        sys.path.insert(0, parent_dir)
+        import dist_util, logger
+        from image_datasets_vae import load_data_vae
+        from resample import create_named_schedule_sampler
+        from script_util_vae import (
+            model_and_diffusion_defaults_vae,
+            create_model_and_diffusion_vae,
+            args_to_dict,
+            add_dict_to_argparser,
+        )
+        from train_util import TrainLoop
+        from vae_wrapper import VAEInterface
+    except ImportError:
+        # 最后尝试从当前目录的父目录导入
+        sys.path.insert(0, os.path.dirname(current_dir))
+        import dist_util, logger
+        from image_datasets_vae import load_data_vae
+        from resample import create_named_schedule_sampler
+        from script_util_vae import (
+            model_and_diffusion_defaults_vae,
+            create_model_and_diffusion_vae,
+            args_to_dict,
+            add_dict_to_argparser,
+        )
+        from train_util import TrainLoop
+        from vae_wrapper import VAEInterface
 
 
 def main():
