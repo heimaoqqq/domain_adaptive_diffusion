@@ -6,9 +6,14 @@
 import argparse
 import inspect
 
-from . import gaussian_diffusion as gd
-from .respace import SpacedDiffusion, space_timesteps
-from .unet import UNetModel
+try:
+    from . import gaussian_diffusion as gd
+    from .respace import SpacedDiffusion, space_timesteps
+    from .unet import UNetModel
+except ImportError:
+    import gaussian_diffusion as gd
+    from respace import SpacedDiffusion, space_timesteps
+    from unet import UNetModel
 
 # 微多普勒数据集的类别数
 NUM_CLASSES = 31  # 31个用户
