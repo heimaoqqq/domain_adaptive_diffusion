@@ -8,19 +8,7 @@ import sys
 import os
 from pathlib import Path
 
-# 添加可能的路径到sys.path
-current_dir = Path(__file__).parent
-parent_dir = current_dir.parent
-
-# 尝试添加多个可能的路径
-for path in [
-    parent_dir,  # guided_diffusion_vae的父目录
-    parent_dir.parent,  # 再上一级
-    Path('/kaggle/working'),  # Kaggle工作目录
-    Path('/kaggle/working/domain_adaptive_diffusion'),  # Kaggle特定路径
-]:
-    if path.exists() and str(path) not in sys.path:
-        sys.path.insert(0, str(path))
+# 路径将在_load_vae方法中处理
 
 class VAEInterface:
     """VAE接口类，处理编码和解码"""
@@ -41,9 +29,32 @@ class VAEInterface:
         
     def _load_vae(self, vae_path):
         """加载VAE模型"""
+        # 添加项目根目录到sys.path（参考train_adm_official.py的做法）
+        import sys
+        from pathlib import Path
+        
+        # 从当前文件位置向上找到项目根目录
+        current_file = Path(__file__).resolve()
+        
+        # 检查是否在Kaggle环境
+        if '/kaggle/working' in str(current_file):
+            # 在Kaggle中，domain_adaptive_diffusion直接在/kaggle/working下
+            project_root = Path('/kaggle/working')
+            print(f"检测到Kaggle环境，设置项目根目录为: {project_root}")
+        else:
+            # 本地环境: guided_diffusion_vae/vae_wrapper.py -> 向上两级到达项目根目录
+            project_root = current_file.parent.parent
+            print(f"本地环境，项目根目录为: {project_root}")
+        
+        # 添加到sys.path
+        if str(project_root) not in sys.path:
+            sys.path.insert(0, str(project_root))
+            print(f"添加到sys.path: {project_root}")
+        
         try:
-            # 尝试导入VAE模块
+            # 直接导入（因为已经添加了项目根目录到sys.path）
             from domain_adaptive_diffusion.vae.kl_vae import KL_VAE
+            print("✓ 成功导入KL_VAE")
             
             # 创建KL_VAE实例 - 使用默认配置
             self.vae = KL_VAE(
@@ -73,16 +84,43 @@ class VAEInterface:
                 else:
                     self.vae.load_state_dict(checkpoint)
                 print("✓ VAE权重加载成功")
+                
+                # 冻结VAE参数
+                for param in self.vae.parameters():
+                    param.requires_grad = False
             else:
                 print(f"⚠️ 警告: VAE权重文件不存在: {vae_path}")
-                print("   使用随机初始化的VAE（仅用于测试）")
+                raise FileNotFoundError(f"必须提供预训练的VAE权重: {vae_path}")
             
             self.vae = self.vae.to(self.device)
             self.vae.eval()
             
-        except ImportError:
-            print("⚠️ 无法导入VAE模块，创建模拟VAE用于测试")
-            self._create_dummy_vae()
+        except ImportError as e:
+            print(f"\n❌ 无法导入KL_VAE模块: {e}")
+            print("\n可能的解决方案：")
+            print("1. 确保domain_adaptive_diffusion目录在正确的位置")
+            print("2. 在Kaggle中，确保文件结构如下：")
+            print("   /kaggle/working/domain_adaptive_diffusion/")
+            print("   ├── vae/")
+            print("   │   └── kl_vae.py")
+            print("   └── guided_diffusion_vae/")
+            print("       └── vae_wrapper.py (当前文件)")
+            
+            # 尝试打印一些调试信息
+            print(f"\n当前工作目录: {os.getcwd()}")
+            print(f"当前文件路径: {Path(__file__).resolve()}")
+            print(f"项目根目录: {project_root.resolve()}")
+            print(f"sys.path包含: {sys.path[:5]}...")  # 只显示前5个
+            
+            # 检查文件是否存在
+            kl_vae_file = project_root / 'domain_adaptive_diffusion' / 'vae' / 'kl_vae.py'
+            if kl_vae_file.exists():
+                print(f"\n✓ 找到kl_vae.py文件: {kl_vae_file}")
+                print("但是导入失败，可能是依赖问题")
+            else:
+                print(f"\n❌ 找不到kl_vae.py文件，预期位置: {kl_vae_file}")
+                
+            raise ImportError(f"无法导入KL_VAE，请检查文件结构和依赖: {e}")
     
     def _create_dummy_vae(self):
         """创建模拟VAE用于测试"""
