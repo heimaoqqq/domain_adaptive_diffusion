@@ -6,9 +6,21 @@ import torch
 import torch.nn as nn
 import sys
 import os
+from pathlib import Path
 
-# 添加父目录到路径以导入VAE
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 添加可能的路径到sys.path
+current_dir = Path(__file__).parent
+parent_dir = current_dir.parent
+
+# 尝试添加多个可能的路径
+for path in [
+    parent_dir,  # guided_diffusion_vae的父目录
+    parent_dir.parent,  # 再上一级
+    Path('/kaggle/working'),  # Kaggle工作目录
+    Path('/kaggle/working/domain_adaptive_diffusion'),  # Kaggle特定路径
+]:
+    if path.exists() and str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
 class VAEInterface:
     """VAE接口类，处理编码和解码"""
@@ -33,26 +45,31 @@ class VAEInterface:
             # 尝试导入VAE模块
             from domain_adaptive_diffusion.vae.kl_vae import KL_VAE
             
-            # 创建VAE实例
+            # 创建KL_VAE实例 - 使用默认配置
             self.vae = KL_VAE(
-                in_channels=3,
-                latent_channels=4,
-                out_channels=3,
-                down_block_types=["DownEncoderBlock2D"] * 4,
-                up_block_types=["UpDecoderBlock2D"] * 4,
-                block_out_channels=[128, 256, 512, 512],
-                layers_per_block=2,
-                act_fn="silu",
-                norm_num_groups=32,
-                sample_size=256
+                ddconfig=None,  # 使用默认配置 
+                embed_dim=4,
+                scale_factor=self.scale_factor
             )
             
             # 加载权重
             if os.path.exists(vae_path):
                 print(f"加载VAE权重: {vae_path}")
                 checkpoint = torch.load(vae_path, map_location=self.device)
-                if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-                    self.vae.load_state_dict(checkpoint['model_state_dict'])
+                if isinstance(checkpoint, dict):
+                    if 'model_state_dict' in checkpoint:
+                        self.vae.load_state_dict(checkpoint['model_state_dict'])
+                    elif 'state_dict' in checkpoint:
+                        self.vae.load_state_dict(checkpoint['state_dict'])
+                    else:
+                        # checkpoint本身就是state_dict
+                        self.vae.load_state_dict(checkpoint)
+                    
+                    # 更新scale_factor如果checkpoint中有
+                    if 'scale_factor' in checkpoint:
+                        self.scale_factor = float(checkpoint['scale_factor'])
+                        self.vae.scale_factor = self.scale_factor
+                        print(f"✓ 使用checkpoint中的scale_factor: {self.scale_factor}")
                 else:
                     self.vae.load_state_dict(checkpoint)
                 print("✓ VAE权重加载成功")
@@ -70,10 +87,11 @@ class VAEInterface:
     def _create_dummy_vae(self):
         """创建模拟VAE用于测试"""
         class DummyVAE(nn.Module):
-            def __init__(self):
+            def __init__(self, scale_factor=0.18215):
                 super().__init__()
                 self.encoder = nn.Conv2d(3, 4, 1)  # 简单1x1卷积
                 self.decoder = nn.Conv2d(4, 3, 1)
+                self.scale_factor = scale_factor
                 
             def encode(self, x):
                 """模拟编码"""
@@ -89,8 +107,18 @@ class VAEInterface:
                 H, W = x.shape[2] * 4, x.shape[3] * 4
                 x = nn.functional.interpolate(x, size=(H, W), mode='bilinear')
                 return torch.sigmoid(x)
+                
+            def encode_images(self, images):
+                """兼容KL_VAE的encode_images接口"""
+                latents = self.encode(images)
+                return latents * self.scale_factor
+                
+            def decode_latents(self, latents):
+                """兼容KL_VAE的decode_latents接口"""
+                latents = latents / self.scale_factor
+                return self.decode(latents)
         
-        self.vae = DummyVAE().to(self.device)
+        self.vae = DummyVAE(self.scale_factor).to(self.device)
         self.vae.eval()
         print("✓ 创建模拟VAE（仅用于测试）")
     
@@ -115,19 +143,8 @@ class VAEInterface:
             images = torch.clamp(images, 0, 1)
         
         with torch.no_grad():
-            # 使用VAE的encode_images方法（如果有）
-            if hasattr(self.vae, 'encode_images'):
-                latents = self.vae.encode_images(images)  # 已包含scale_factor
-            else:
-                # 否则手动编码和缩放
-                if hasattr(self.vae, 'encode'):
-                    latents = self.vae.encode(images)
-                    if hasattr(latents, 'sample'):
-                        latents = latents.sample()
-                else:
-                    # DummyVAE
-                    latents = self.vae.encode(images)
-                latents = latents * self.scale_factor
+            # 使用VAE的encode_images方法
+            latents = self.vae.encode_images(images)
                 
         return latents
     
@@ -147,14 +164,8 @@ class VAEInterface:
         latents = latents.to(self.device)
         
         with torch.no_grad():
-            # 使用VAE的decode_latents方法（如果有）
-            if hasattr(self.vae, 'decode_latents'):
-                images = self.vae.decode_latents(latents)  # 已处理scale_factor
-            else:
-                # 否则手动缩放和解码
-                latents = latents / self.scale_factor
-                images = self.vae.decode(latents)
-                images = torch.clamp(images, 0, 1)
+            # 使用VAE的decode_latents方法
+            images = self.vae.decode_latents(latents)
                 
         return images
     
