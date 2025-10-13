@@ -151,7 +151,7 @@ def create_argparser():
         random_flip=True,          # 数据增强
         
         # VAE参数
-        vae_model_path="domain_adaptive_diffusion/vae/vae_model.pt",
+        vae_model_path="/kaggle/input/kl-vae-best-pt/kl_vae_best.pt",
         test_vae=True,  # 是否测试VAE
         
         # 训练参数
