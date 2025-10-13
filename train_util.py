@@ -252,7 +252,8 @@ class TrainLoop:
             ) as f:
                 th.save(self.opt.state_dict(), f)
 
-        dist.barrier()
+        # 单GPU模式，不需要barrier
+        # dist.barrier()
 
 
 def parse_resume_step_from_filename(filename):
