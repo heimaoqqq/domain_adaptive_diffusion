@@ -32,17 +32,30 @@ try:
     )
     from guided_diffusion_vae.vae_wrapper import VAEInterface
 except ImportError:
-    # 如果上面失败，尝试直接导入
-    sys.path.insert(0, os.path.dirname(parent_dir))
-    import dist_util, logger
-    from script_util_vae import (
-        NUM_CLASSES,
-        model_and_diffusion_defaults_vae,
-        create_model_and_diffusion_vae,
-        add_dict_to_argparser,
-        args_to_dict,
-    )
-    from vae_wrapper import VAEInterface
+    # 如果上面失败，尝试直接导入（对于Kaggle环境）
+    try:
+        sys.path.insert(0, parent_dir)
+        import dist_util, logger
+        from script_util_vae import (
+            NUM_CLASSES,
+            model_and_diffusion_defaults_vae,
+            create_model_and_diffusion_vae,
+            add_dict_to_argparser,
+            args_to_dict,
+        )
+        from vae_wrapper import VAEInterface
+    except ImportError:
+        # 最后尝试从当前目录的父目录导入
+        sys.path.insert(0, os.path.dirname(current_dir))
+        import dist_util, logger
+        from script_util_vae import (
+            NUM_CLASSES,
+            model_and_diffusion_defaults_vae,
+            create_model_and_diffusion_vae,
+            add_dict_to_argparser,
+            args_to_dict,
+        )
+        from vae_wrapper import VAEInterface
 
 
 def main():
