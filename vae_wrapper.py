@@ -52,9 +52,15 @@ class VAEInterface:
             print(f"添加到sys.path: {project_root}")
         
         try:
-            # 直接导入（因为已经添加了项目根目录到sys.path）
-            from domain_adaptive_diffusion.vae.kl_vae import KL_VAE
-            print("✓ 成功导入KL_VAE")
+            # 尝试从多个位置导入
+            try:
+                # 如果kl_vae.py在guided_diffusion_vae/vae/目录下
+                from vae.kl_vae import KL_VAE
+                print("✓ 成功导入KL_VAE (from vae.kl_vae)")
+            except ImportError:
+                # 如果在原始位置
+                from domain_adaptive_diffusion.vae.kl_vae import KL_VAE
+                print("✓ 成功导入KL_VAE (from domain_adaptive_diffusion.vae.kl_vae)")
             
             # 创建KL_VAE实例 - 使用默认配置
             self.vae = KL_VAE(
