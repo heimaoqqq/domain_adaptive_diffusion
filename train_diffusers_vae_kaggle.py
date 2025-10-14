@@ -4,14 +4,14 @@ Diffusers + VAE训练脚本 - Latent Diffusion版本
 """
 
 import os
+import sys
 import torch
 import torch.nn.functional as F
 from diffusers import (
-    AutoencoderKL,
-    UNet2DModel, 
+    UNet2DModel,
+    UNet2DConditionModel,  # SD官方架构
     DDPMScheduler,
-    DDIMScheduler,
-    StableDiffusionPipeline
+    DDIMScheduler
 )
 from diffusers.optimization import get_cosine_schedule_with_warmup
 from accelerate import Accelerator
@@ -31,9 +31,6 @@ def load_pretrained_vae(vae_path="/kaggle/input/kl-vae-best-pt/kl_vae_best.pt"):
     """
     try:
         # 加载KL-VAE
-        import sys
-        import os
-        
         # 添加VAE模块路径
         vae_path_dir = '/kaggle/working/domain_adaptive_diffusion/vae'
         if vae_path_dir not in sys.path:
@@ -68,7 +65,6 @@ def load_pretrained_vae(vae_path="/kaggle/input/kl-vae-best-pt/kl_vae_best.pt"):
         print("2. kl_vae.py是否在：/kaggle/working/domain_adaptive_diffusion/vae/")
         print("3. VAE checkpoint格式是否包含'model_state_dict'键")
         print(f"="*60)
-        import sys
         sys.exit(1)  # 直接退出程序
 
 
@@ -110,49 +106,124 @@ class VAEWrapper:
                 return self.vae.decode(z).sample
 
 
+# ============ 2.5. SD官方风格的类别条件编码器 ============
+class ClassConditioner(torch.nn.Module):
+    """
+    将类别ID转为适用于Cross-Attention的序列嵌入
+    设计理念：类似CLIP text encoder，但针对类别ID优化
+    """
+    def __init__(self, num_classes=32, embed_dim=512, seq_length=8, dropout=0.1):
+        """
+        num_classes: 类别数（31用户+1无条件）
+        embed_dim: 嵌入维度（与UNet的cross_attention_dim匹配）
+        seq_length: 序列长度（更长的序列=更丰富的条件信息）
+        dropout: Dropout比率（正则化）
+        """
+        super().__init__()
+        self.num_classes = num_classes
+        self.seq_length = seq_length
+        self.embed_dim = embed_dim
+        
+        # 类别嵌入表
+        self.class_embedding = torch.nn.Embedding(num_classes, embed_dim)
+        
+        # 位置编码（让序列的不同位置学习不同特征）
+        self.position_embedding = torch.nn.Parameter(
+            torch.randn(1, seq_length, embed_dim) * 0.02
+        )
+        
+        # Transformer层：增强特征表达能力（SD官方做法）
+        encoder_layer = torch.nn.TransformerEncoderLayer(
+            d_model=embed_dim,
+            nhead=8,  # 8个注意力头
+            dim_feedforward=embed_dim * 4,  # FFN维度
+            dropout=dropout,
+            activation='gelu',
+            batch_first=True,
+            norm_first=True  # Pre-LN（更稳定）
+        )
+        self.transformer = torch.nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=2  # 2层transformer（平衡表达能力和过拟合）
+        )
+        
+        # Dropout（正则化）
+        self.dropout = torch.nn.Dropout(dropout)
+        
+        # Layer Norm（稳定训练）
+        self.final_ln = torch.nn.LayerNorm(embed_dim)
+        
+    def forward(self, class_labels):
+        """
+        class_labels: [B] 类别ID张量
+        返回: [B, seq_length, embed_dim] 用于cross-attention
+        """
+        batch_size = class_labels.shape[0]
+        
+        # 1. 类别嵌入 [B, 1, embed_dim]
+        class_emb = self.class_embedding(class_labels).unsqueeze(1)
+        
+        # 2. 复制成序列 [B, seq_length, embed_dim]
+        seq_emb = class_emb.expand(-1, self.seq_length, -1)
+        
+        # 3. 添加位置编码
+        seq_emb = seq_emb + self.position_embedding
+        
+        # 4. Dropout
+        seq_emb = self.dropout(seq_emb)
+        
+        # 5. Transformer增强特征
+        seq_emb = self.transformer(seq_emb)
+        
+        # 6. Final LayerNorm
+        seq_emb = self.final_ln(seq_emb)
+        
+        return seq_emb
+
+
 # ============ 3. Latent Diffusion模型配置 ============
 def get_latent_model_config():
     """
-    Latent空间的UNet配置
-    注意：输入是32x32x4，不是256x256x3
+    SD官方架构的UNet配置（针对小数据集优化）
+    使用UNet2DConditionModel + Cross-Attention
     """
     
     configs = {
-        "nano": {  # ~5M参数（太小，可能欠拟合）
-            "layers_per_block": 1,
-            "block_out_channels": (128, 256, 256),
-            "attention_resolutions": [],  # 无注意力
-        },
-        "micro": {  # ~10M参数（推荐：平衡过拟合和生成质量）
+        "micro": {  # ~25M参数（推荐：小数据集）
             "layers_per_block": 2,
-            "block_out_channels": (96, 192, 256, 256),
-            "attention_resolutions": [8],  # 在8x8使用注意力（保留全局建模能力）
+            "block_out_channels": (128, 256, 384, 384),
+            "attention_head_dim": 8,  # 8头注意力（SD标准）
+            "cross_attention_dim": 512,  # 条件嵌入维度
+            "transformer_layers_per_block": 1,  # 每个block的transformer层数
+            "dropout": 0.1,  # UNet内部dropout（正则化）
         },
-        "tiny": {  # ~101M参数（太大，会过拟合）
+        "small": {  # ~45M参数
             "layers_per_block": 2,
-            "block_out_channels": (128, 256, 512, 512),
-            "attention_resolutions": [8],  # 在8x8分辨率（SD官方小模型配置）
+            "block_out_channels": (160, 320, 480, 640),
+            "attention_head_dim": 8,
+            "cross_attention_dim": 640,
+            "transformer_layers_per_block": 1,
+            "dropout": 0.1,
         },
-        "small": {  # ~50M参数
-            "layers_per_block": 2,
-            "block_out_channels": (224, 448, 672, 896),
-            "attention_resolutions": [8, 4],  # 在8x8和4x4（更多注意力）
-        },
-        "base": {  # ~860M参数（标准SD）
+        "base": {  # ~860M参数（标准SD 1.5配置）
             "layers_per_block": 2,
             "block_out_channels": (320, 640, 1280, 1280),
-            "attention_resolutions": [8, 4],  # SD官方在latent空间的注意力配置
+            "attention_head_dim": 8,
+            "cross_attention_dim": 768,
+            "transformer_layers_per_block": 1,
+            "dropout": 0.0,  # SD官方不用dropout（数据集大）
         }
     }
     
-    # 对latent训练，使用micro平衡过拟合和生成质量
-    selected = "micro"  # ← ~15M参数，保留注意力层，适合4K数据
+    # 选择micro配置（适合4K样本的小数据集）
+    selected = "micro"
     config = configs[selected]
     
-    print(f"使用 {selected} Latent Diffusion配置:")
+    print(f"使用 {selected} SD架构配置（Cross-Attention）:")
     print(f"  - Latent尺寸: 32x32x4")
     print(f"  - 通道数: {config['block_out_channels']}")
-    print(f"  - 注意力: {config['attention_resolutions']}")
+    print(f"  - Cross-Attention维度: {config['cross_attention_dim']}")
+    print(f"  - Dropout: {config['dropout']}")
     
     return config
 
@@ -198,7 +269,6 @@ class LatentDataset(Dataset):
                 print("错误：latent数据为空！")
                 print(f"数据文件：{data_path}")
                 print(f"="*60)
-                import sys
                 sys.exit(1)
             
             print(f"加载 {len(self.latents)} 个latent样本, 形状: {self.latents[0].shape}")
@@ -277,45 +347,47 @@ def train_latent_diffusion(
     vae_model.eval()  # VAE保持eval模式
     vae_wrapper = VAEWrapper(vae_model, vae_type)
     
-    # 获取latent模型配置
+    # 获取SD官方配置
     config = get_latent_model_config()
+    num_classes = 32  # 31用户 + 1无条件
     
-    # 创建条件UNet（增强条件编码能力）
-    # Normal_line有31个用户（ID_01到ID_31）+ 1个无条件标签
-    num_classes = 32  # 31个用户 + 1个无条件(用于classifier-free guidance)
+    # 创建条件编码器（类似SD的CLIP encoder）
+    class_conditioner = ClassConditioner(
+        num_classes=num_classes,
+        embed_dim=config["cross_attention_dim"],
+        seq_length=8,  # 序列长度（平衡表达能力和计算量）
+        dropout=0.1  # 条件编码器内部dropout（正则化）
+    )
     
-    # 增强配置：用户差异小，需要更强的条件编码
-    unet = UNet2DModel(
-        sample_size=32,  # latent大小
-        in_channels=4,   # VAE latent channels
+    # 创建UNet2DConditionModel（SD官方架构）
+    unet = UNet2DConditionModel(
+        sample_size=32,  # latent尺寸
+        in_channels=4,   # VAE latent通道
         out_channels=4,
         layers_per_block=config["layers_per_block"],
         block_out_channels=config["block_out_channels"],
-        # SD官方方式：根据分辨率而非索引判断
-        # 对于32x32 latent + 4个stage:
-        #   i=0: 32//1=32, i=1: 32//2=16, i=2: 32//4=8, i=3: 32//8=4
-        # attention_resolutions=[8]表示在8x8分辨率(i=2)使用注意力
+        # SD官方：所有block都使用CrossAttention
         down_block_types=tuple(
-            "AttnDownBlock2D" if (32 // (2**i)) in config.get("attention_resolutions", [])
-            else "DownBlock2D"
-            for i in range(len(config["block_out_channels"]))
+            "CrossAttnDownBlock2D" for _ in config["block_out_channels"]
         ),
-        # 上采样：镜像对称（第0个stage对应下采样第3个，第1个对应第2个...）
         up_block_types=tuple(
-            "AttnUpBlock2D" if (32 // (2**(len(config["block_out_channels"])-1-i))) in config.get("attention_resolutions", [])
-            else "UpBlock2D"
-            for i in range(len(config["block_out_channels"]))
+            "CrossAttnUpBlock2D" for _ in config["block_out_channels"]
         ),
-        attention_head_dim=8,  # SD官方标准：8个注意力头维度
-        norm_num_groups=32,  # SD官方标准：32个GroupNorm组
-        act_fn="silu",  # SD官方标准：SiLU激活函数
-        # 条件编码（Diffusers的UNet2DModel默认使用加法融合）
-        class_embed_type="timestep",  # 将类别嵌入加到时间步嵌入（加法融合）
-        num_class_embeds=num_classes,  # 31用户 + 1无条件
+        # Cross-Attention配置
+        attention_head_dim=config["attention_head_dim"],
+        cross_attention_dim=config["cross_attention_dim"],
+        transformer_layers_per_block=config["transformer_layers_per_block"],
+        # 正则化
+        dropout=config["dropout"],  # UNet内部dropout
+        # SD官方标准
+        norm_num_groups=32,
+        act_fn="silu",
     )
     
-    total_params = sum(p.numel() for p in unet.parameters()) / 1e6
-    print(f"UNet参数: {total_params:.1f}M")
+    # 打印参数量
+    unet_params = sum(p.numel() for p in unet.parameters()) / 1e6
+    cond_params = sum(p.numel() for p in class_conditioner.parameters()) / 1e6
+    print(f"UNet参数: {unet_params:.1f}M + 条件编码器: {cond_params:.1f}M = 总计: {unet_params + cond_params:.1f}M")
     
     # 数据集（使用预编码的latent）
     dataset = LatentDataset(
@@ -326,7 +398,6 @@ def train_latent_diffusion(
     # 验证数据集
     if len(dataset) == 0:
         print("错误：数据集为空！")
-        import sys
         sys.exit(1)
     
     dataloader = DataLoader(
@@ -357,24 +428,25 @@ def train_latent_diffusion(
         prediction_type="epsilon",
     )
     
-    # 优化器（使用传入的weight_decay参数）
+    # 优化器（同时优化UNet和条件编码器）
+    # 增强weight_decay以防止过拟合
     optimizer = torch.optim.AdamW(
-        unet.parameters(),
+        list(unet.parameters()) + list(class_conditioner.parameters()),
         lr=learning_rate,
         betas=(0.9, 0.999),
-        weight_decay=weight_decay,  # 使用传入的参数
+        weight_decay=0.02,  # 增强L2正则化（从0.015→0.02）
     )
     
-    # 学习率调度
+    # 学习率调度（余弦退火 + warmup）
     lr_scheduler = get_cosine_schedule_with_warmup(
         optimizer,
         num_warmup_steps=500,
         num_training_steps=len(dataloader) * num_epochs,
     )
     
-    # 准备训练（包括验证集）
-    unet, optimizer, dataloader, val_dataloader, lr_scheduler = accelerator.prepare(
-        unet, optimizer, dataloader, val_dataloader, lr_scheduler
+    # 准备训练（包括两个模型）
+    unet, class_conditioner, optimizer, dataloader, val_dataloader, lr_scheduler = accelerator.prepare(
+        unet, class_conditioner, optimizer, dataloader, val_dataloader, lr_scheduler
     )
     
     # 开始训练
@@ -417,24 +489,30 @@ def train_latent_diffusion(
             
             noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
             
-            # 10%概率使用无条件训练（增强条件效果）
+            # 10%概率使用无条件训练（Classifier-Free Guidance）
             if torch.rand(1).item() < 0.1:
-                # Classifier-free guidance训练：随机丢弃条件
-                uncond_labels = torch.full_like(labels, num_uncond_label)  # 使用31作为无条件标签
+                uncond_labels = torch.full_like(labels, num_uncond_label)
             else:
                 uncond_labels = labels
             
-            # 条件预测噪声（传入用户ID作为类别条件）
+            # 生成条件嵌入（使用Cross-Attention）
+            encoder_hidden_states = class_conditioner(uncond_labels)
+            
+            # 预测噪声（SD官方方式）
             noise_pred = unet(
-                noisy_latents, 
+                noisy_latents,
                 timesteps,
-                class_labels=uncond_labels  # 条件信息或无条件
+                encoder_hidden_states=encoder_hidden_states  # Cross-Attention条件
             ).sample
             loss = F.mse_loss(noise_pred, noise)
             
-            # 更新
+            # 反向传播和优化
             accelerator.backward(loss)
-            accelerator.clip_grad_norm_(unet.parameters(), 1.0)
+            # 梯度裁剪（防止梯度爆炸）
+            accelerator.clip_grad_norm_(
+                list(unet.parameters()) + list(class_conditioner.parameters()), 
+                1.0
+            )
             optimizer.step()
             lr_scheduler.step()
             optimizer.zero_grad()
@@ -458,12 +536,11 @@ def train_latent_diffusion(
         # 验证集评估
         val_losses = []
         unet.eval()
+        class_conditioner.eval()
         with torch.no_grad():
             for batch in val_dataloader:
                 latents = batch["latents"]
                 labels = batch["labels"]
-                
-                # 确保labels在正确的设备上
                 labels = labels.to(latents.device)
                 
                 noise = torch.randn_like(latents)
@@ -473,12 +550,20 @@ def train_latent_diffusion(
                 ).long()
                 
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
-                noise_pred = unet(noisy_latents, timesteps, class_labels=labels).sample
+                
+                # 使用Cross-Attention
+                encoder_hidden_states = class_conditioner(labels)
+                noise_pred = unet(
+                    noisy_latents, 
+                    timesteps, 
+                    encoder_hidden_states=encoder_hidden_states
+                ).sample
                 val_loss = F.mse_loss(noise_pred, noise)
                 val_losses.append(val_loss.item())
         
         avg_val_loss = sum(val_losses) / len(val_losses) if val_losses else 0
         unet.train()
+        class_conditioner.train()
         
         # 早停和最佳模型保存逻辑
         is_best = avg_val_loss < best_val_loss
@@ -492,13 +577,22 @@ def train_latent_diffusion(
             # 删除旧的最佳模型
             if best_model_path is not None and os.path.exists(best_model_path):
                 os.remove(best_model_path)
+                best_cond_path = best_model_path.replace("unet", "conditioner")
+                if os.path.exists(best_cond_path):
+                    os.remove(best_cond_path)
                 print(f"删除旧模型: {os.path.basename(best_model_path)}")
             
-            # 保存新的最佳模型
+            # 保存新的最佳模型（UNet + 条件编码器）
             best_model_path = os.path.join(output_dir, f"best_unet_epoch{epoch+1}_valloss{avg_val_loss:.4f}.pt")
+            best_cond_path = os.path.join(output_dir, f"best_conditioner_epoch{epoch+1}_valloss{avg_val_loss:.4f}.pt")
+            
             torch.save(
                 accelerator.unwrap_model(unet).state_dict(),
                 best_model_path
+            )
+            torch.save(
+                accelerator.unwrap_model(class_conditioner).state_dict(),
+                best_cond_path
             )
             print(f"Epoch {epoch+1}/{num_epochs}: train_loss={avg_train_loss:.4f}, val_loss={avg_val_loss:.4f} ★NEW BEST★")
         else:
@@ -515,7 +609,7 @@ def train_latent_diffusion(
         # 每N个epoch生成可视化样本
         if (epoch + 1) % sample_every_n_epochs == 0:
             generate_latent_samples(
-                unet, vae_wrapper, noise_scheduler, 
+                unet, class_conditioner, vae_wrapper, noise_scheduler,
                 epoch, global_step
             )
     
@@ -523,19 +617,24 @@ def train_latent_diffusion(
     os.makedirs(output_dir, exist_ok=True)
     
     # 保存最后一个epoch的模型（作为备份）
-    last_model_path = os.path.join(output_dir, "last_unet.pt")
-    torch.save(
-        accelerator.unwrap_model(unet).state_dict(),
-        last_model_path
-    )
-    print(f"\n最后epoch模型已保存: {os.path.basename(last_model_path)}")
+    last_unet_path = os.path.join(output_dir, "last_unet.pt")
+    last_cond_path = os.path.join(output_dir, "last_conditioner.pt")
+    torch.save(accelerator.unwrap_model(unet).state_dict(), last_unet_path)
+    torch.save(accelerator.unwrap_model(class_conditioner).state_dict(), last_cond_path)
+    print(f"\n最后epoch模型已保存: {os.path.basename(last_unet_path)}, {os.path.basename(last_cond_path)}")
     
     # 创建最佳模型的符号链接（便于加载）
     if best_model_path is not None:
-        best_link_path = os.path.join(output_dir, "best_unet.pt")
         import shutil
-        shutil.copy(best_model_path, best_link_path)
-        print(f"最佳模型已复制: {os.path.basename(best_link_path)}")
+        best_unet_link = os.path.join(output_dir, "best_unet.pt")
+        best_cond_link = os.path.join(output_dir, "best_conditioner.pt")
+        shutil.copy(best_model_path, best_unet_link)
+        
+        best_cond_path = best_model_path.replace("unet", "conditioner")
+        if os.path.exists(best_cond_path):
+            shutil.copy(best_cond_path, best_cond_link)
+        
+        print(f"最佳模型已复制: best_unet.pt, best_conditioner.pt")
         print(f"  └─ 来源: {os.path.basename(best_model_path)}")
         print(f"  └─ 最佳验证损失: {best_val_loss:.4f}")
     
@@ -551,39 +650,50 @@ def train_latent_diffusion(
     
     print(f"\n所有模型和配置已保存到: {output_dir}")
     
-    return unet, vae_wrapper
+    return unet, vae_wrapper, class_conditioner
 
 
 # ============ 6. 生成样本 ============
-def generate_latent_samples(unet, vae_wrapper, scheduler, epoch, step, guidance_scale=3.5):
+def generate_latent_samples(unet, class_conditioner, vae_wrapper, scheduler, epoch, step, guidance_scale=3.5):
     """条件生成样本（选择4个不同用户）"""
     unet.eval()
+    class_conditioner.eval()
     
     with torch.no_grad():
-        # 初始化随机噪声（真实采样，非模拟数据）
+        # 初始化随机噪声
         batch_size = 4
         latents = torch.randn((batch_size, 4, 32, 32), device=unet.device)
         
-        # 选择不同的用户ID进行条件生成
-        # 选择用户 0, 7, 14, 21（分散选择）
+        # 选择不同的用户ID进行条件生成（分散选择）
         class_labels = torch.tensor([0, 7, 14, 21], device=unet.device, dtype=torch.long)
-        uncond_labels = torch.full_like(class_labels, 31)  # 无条件标签
         
         # DDIM采样（100步，提高质量）
-        scheduler.set_timesteps(100)  
+        scheduler.set_timesteps(100)
         
         for t in scheduler.timesteps:
-            # 条件生成
-            noise_pred_cond = unet(latents, t, class_labels=class_labels).sample
-            
+            # Classifier-Free Guidance（SD官方做法）
             if guidance_scale > 1.0:
-                # 无条件预测
-                noise_pred_uncond = unet(latents, t, class_labels=uncond_labels).sample
-                # Classifier-free guidance
+                # 合并条件和无条件输入
+                latent_input = torch.cat([latents] * 2)
+                t_input = torch.cat([t.unsqueeze(0)] * 2)
+                
+                # 条件嵌入
+                cond_emb = class_conditioner(class_labels)
+                uncond_labels = torch.full_like(class_labels, 31)
+                uncond_emb = class_conditioner(uncond_labels)
+                encoder_hidden_states = torch.cat([cond_emb, uncond_emb])
+                
+                # 预测噪声
+                noise_pred = unet(latent_input, t_input, encoder_hidden_states=encoder_hidden_states).sample
+                
+                # 分离条件和无条件预测
+                noise_pred_cond, noise_pred_uncond = noise_pred.chunk(2)
                 noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
             else:
-                noise_pred = noise_pred_cond
-                
+                # 仅条件生成
+                encoder_hidden_states = class_conditioner(class_labels)
+                noise_pred = unet(latents, t, encoder_hidden_states=encoder_hidden_states).sample
+            
             latents = scheduler.step(noise_pred, t, latents).prev_sample
         
         # 解码到图像空间
@@ -592,6 +702,7 @@ def generate_latent_samples(unet, vae_wrapper, scheduler, epoch, step, guidance_
         images = images.clamp(0, 1).cpu()
     
     unet.train()
+    class_conditioner.train()
     
     # 保存结果
     fig, axes = plt.subplots(1, 4, figsize=(12, 3))
@@ -606,15 +717,20 @@ def generate_latent_samples(unet, vae_wrapper, scheduler, epoch, step, guidance_
 
 # ============ 7. 推理pipeline ============
 class LatentDiffusionPipeline:
-    """简单的推理pipeline"""
+    """SD架构的推理pipeline（支持Cross-Attention）"""
     
-    def __init__(self, unet, vae_wrapper, scheduler):
+    def __init__(self, unet, class_conditioner, vae_wrapper, scheduler):
         self.unet = unet
+        self.class_conditioner = class_conditioner
         self.vae_wrapper = vae_wrapper
         self.scheduler = scheduler
     
     @torch.no_grad()
     def __call__(self, batch_size=4, num_inference_steps=50, ddim=True, class_labels=None, guidance_scale=2.0):
+        # 设置为eval模式
+        self.unet.eval()
+        self.class_conditioner.eval()
+        
         # 使用DDIM加速
         if ddim:
             self.scheduler = DDIMScheduler.from_config(self.scheduler.config)
@@ -629,26 +745,33 @@ class LatentDiffusionPipeline:
         
         # 设置条件标签（如果没有指定，随机选择用户）
         if class_labels is None:
-            # 随机选择不同用户
             class_labels = torch.randint(0, 31, (batch_size,), device=self.unet.device)
         elif not isinstance(class_labels, torch.Tensor):
             class_labels = torch.tensor(class_labels, device=self.unet.device, dtype=torch.long)
         
-        # 准备无条件标签（用于classifier-free guidance）
-        uncond_labels = torch.full_like(class_labels, 31)  # 使用31作为无条件标签
-        
-        # 条件去噪循环（支持classifier-free guidance）
+        # 去噪循环（SD官方CFG方式）
         for t in tqdm(self.scheduler.timesteps, desc="生成中"):
-            # 条件预测
-            noise_pred_cond = self.unet(latents, t, class_labels=class_labels).sample
-            
             if guidance_scale > 1.0:
-                # 无条件预测
-                noise_pred_uncond = self.unet(latents, t, class_labels=uncond_labels).sample
-                # Classifier-free guidance
+                # Classifier-Free Guidance（合并batch）
+                latent_input = torch.cat([latents] * 2)
+                t_input = torch.cat([t.unsqueeze(0)] * 2)
+                
+                # 条件嵌入
+                cond_emb = self.class_conditioner(class_labels)
+                uncond_labels = torch.full_like(class_labels, 31)
+                uncond_emb = self.class_conditioner(uncond_labels)
+                encoder_hidden_states = torch.cat([cond_emb, uncond_emb])
+                
+                # 预测噪声
+                noise_pred = self.unet(latent_input, t_input, encoder_hidden_states=encoder_hidden_states).sample
+                
+                # 分离并组合
+                noise_pred_cond, noise_pred_uncond = noise_pred.chunk(2)
                 noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
             else:
-                noise_pred = noise_pred_cond
+                # 仅条件生成
+                encoder_hidden_states = self.class_conditioner(class_labels)
+                noise_pred = self.unet(latents, t, encoder_hidden_states=encoder_hidden_states).sample
             
             latents = self.scheduler.step(noise_pred, t, latents).prev_sample
         
@@ -666,17 +789,16 @@ class LatentDiffusionPipeline:
 
 # ============ 8. 主函数 ============
 if __name__ == "__main__":
-    # 训练
-    print("开始Latent Diffusion训练...")
+    # 训练（SD官方架构 + Cross-Attention）
+    print("开始Latent Diffusion训练（SD架构 + 强正则化）...")
     
-    unet, vae_wrapper = train_latent_diffusion(
+    unet, vae_wrapper, class_conditioner = train_latent_diffusion(
         vae_path="/kaggle/input/kl-vae-best-pt/kl_vae_best.pt",  # 必需！用于解码
         latent_dir="/kaggle/input/data-latent2",  # 预编码的latent
         output_dir="/kaggle/working/latent_diffusion",
         num_epochs=200,  # 最多200轮（早停会提前结束）
         batch_size=64,  # 增大batch size（有10G空余显存）
-        learning_rate=8e-5,  # micro配置：平衡收敛速度和稳定性
-        weight_decay=0.015,  # 适中的L2正则化
+        learning_rate=8e-5,  # SD架构：适中学习率
         sample_every_n_epochs=5,  # 每5个epoch生成可视化样本
         early_stopping_patience=12,  # 早停：12个epoch验证损失无改善则停止
     )
@@ -687,9 +809,11 @@ if __name__ == "__main__":
         num_train_timesteps=1000,
         beta_start=0.00085,
         beta_end=0.012,
+        beta_schedule="scaled_linear",
+        prediction_type="epsilon",
     )
     
-    pipeline = LatentDiffusionPipeline(unet, vae_wrapper, scheduler)
+    pipeline = LatentDiffusionPipeline(unet, class_conditioner, vae_wrapper, scheduler)
     
     # 生成8个样本，选择8个不同的用户
     selected_users = [0, 4, 8, 12, 16, 20, 24, 28]  # 均匀分布的用户ID
