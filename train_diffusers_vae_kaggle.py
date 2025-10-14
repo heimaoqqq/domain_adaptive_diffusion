@@ -35,7 +35,11 @@ def load_pretrained_vae(vae_path="/kaggle/input/kl-vae-best-pt/kl_vae_best.pt"):
         
         # 如果是您自己训练的simplified_vavae
         import sys
-        sys.path.append('/kaggle/working')
+        # 添加多个可能的路径
+        for path in ['/kaggle/working', '/kaggle/input/va-vae', '.']:
+            if path not in sys.path:
+                sys.path.append(path)
+        
         from simplified_vavae import VAVAE
         
         vae = VAVAE(
@@ -53,14 +57,18 @@ def load_pretrained_vae(vae_path="/kaggle/input/kl-vae-best-pt/kl_vae_best.pt"):
         print("成功加载自定义VAE")
         return vae, "custom"
         
-    except:
+    except Exception as e:
+        print(f"加载自定义VAE失败: {e}")
         # 备选：使用diffusers的预训练VAE
-        print("使用Diffusers的VAE（与SD兼容）")
-        vae = AutoencoderKL.from_pretrained(
-            "stabilityai/sd-vae-ft-mse",  # SD的VAE
-            torch_dtype=torch.float16
-        )
-        return vae, "diffusers"
+        print("尝试使用Diffusers的VAE作为备选...")
+        try:
+            vae = AutoencoderKL.from_pretrained(
+                "stabilityai/sd-vae-ft-mse",
+                torch_dtype=torch.float16
+            )
+            return vae, "diffusers"
+        except:
+            raise ValueError("无法加载VAE模型，请检查路径和格式")
 
 
 # ============ 2. VAE包装器（统一接口）============
@@ -183,8 +191,20 @@ class LatentDataset(Dataset):
             stats_path = os.path.join(latent_dir, "data_stats.pt")
             if os.path.exists(stats_path):
                 self.stats = torch.load(stats_path, map_location='cpu')
-                print(f"加载统计信息: mean={self.stats.get('mean', 'N/A')}, std={self.stats.get('std', 'N/A')}")
+                # 提取mean和std的值
+                mean_val = self.stats.get('mean', None)
+                std_val = self.stats.get('std', None)
+                if mean_val is not None and std_val is not None:
+                    if isinstance(mean_val, torch.Tensor):
+                        mean_val = mean_val.mean().item()
+                    if isinstance(std_val, torch.Tensor):
+                        std_val = std_val.mean().item()
+                    print(f"加载统计信息: mean={mean_val:.4f}, std={std_val:.4f}")
+                else:
+                    print("统计信息格式未知，跳过归一化")
+                    self.stats = None
             else:
+                print("未找到统计信息文件，使用原始latent")
                 self.stats = None
         else:
             raise FileNotFoundError(f"找不到数据文件: {data_path}")
@@ -195,37 +215,37 @@ class LatentDataset(Dataset):
     def __getitem__(self, idx):
         latent = self.latents[idx]
         
-        # 确保是4维张量 [C, H, W]
-        if latent.dim() == 3:
-            latent = latent.unsqueeze(0)  # 添加batch维度
-        
-        # 如果是5维 [1, C, H, W]，去掉第一维
+        # 确保是3维张量 [C, H, W]
         if latent.dim() == 4 and latent.shape[0] == 1:
-            latent = latent.squeeze(0)
+            latent = latent.squeeze(0)  # 去掉第一维 [1, C, H, W] -> [C, H, W]
+        elif latent.dim() == 2:
+            latent = latent.unsqueeze(0)  # 添加通道维 [H, W] -> [1, H, W]
         
+        # 不做任何数据增强，直接返回原始latent
         return {"latents": latent}
 
 
 # ============ 5. Latent Diffusion训练 ============
 def train_latent_diffusion(
+    vae_path="/kaggle/input/kl-vae-best-pt/kl_vae_best.pt",  # 必需！用于解码
     latent_dir="/kaggle/input/data-latent2",  # 预编码的latent目录
     output_dir="/kaggle/working/latent_diffusion",
     num_epochs=50,
     batch_size=32,  # latent空间可以更大batch
     learning_rate=1e-4,
-    vae_path=None,  # 可选，用于生成时解码
 ):
     # 加速器
     accelerator = Accelerator(mixed_precision="fp16")
     
-    # 如果提供了VAE路径，加载用于生成时解码（可选）
-    vae_wrapper = None
-    if vae_path and os.path.exists(vae_path):
-        vae_model, vae_type = load_pretrained_vae(vae_path)
-        vae_model.cuda()
-        vae_model.eval()
-        vae_wrapper = VAEWrapper(vae_model, vae_type)
-        print("加载VAE用于样本生成")
+    # 加载VAE（必需，用于生成时解码）
+    print("="*60)
+    print("加载VAE模型...")
+    vae_model, vae_type = load_pretrained_vae(vae_path)
+    vae_model.cuda()
+    vae_model.eval()  # VAE保持eval模式
+    vae_wrapper = VAEWrapper(vae_model, vae_type)
+    print(f"✓ VAE加载成功 (类型: {vae_type})")
+    print("="*60)
     
     # 获取latent模型配置
     config = get_latent_model_config()
@@ -299,8 +319,16 @@ def train_latent_diffusion(
     # 训练循环
     global_step = 0
     for epoch in range(num_epochs):
-        progress_bar = tqdm(total=len(dataloader), desc=f"Epoch {epoch+1}/{num_epochs}")
+        # 使用leave=True保持每个epoch的进度条不消失
+        progress_bar = tqdm(
+            total=len(dataloader), 
+            desc=f"Epoch {epoch+1}/{num_epochs}",
+            leave=True,  # 保持进度条
+            ncols=100,  # 固定宽度
+            position=0  # 固定位置
+        )
         
+        epoch_losses = []
         for batch in dataloader:
             # 直接获取预编码的latent
             latents = batch["latents"]
@@ -325,17 +353,29 @@ def train_latent_diffusion(
             lr_scheduler.step()
             optimizer.zero_grad()
             
+            # 记录损失
+            epoch_losses.append(loss.item())
+            
+            # 更新进度条（简洁模式）
             progress_bar.update(1)
-            progress_bar.set_postfix(loss=loss.item(), lr=lr_scheduler.get_last_lr()[0])
+            progress_bar.set_postfix({
+                'loss': f'{loss.item():.3f}',
+                'lr': f'{lr_scheduler.get_last_lr()[0]:.2e}'
+            })
             
             global_step += 1
             
-            # 定期生成样本（如果有VAE）
-            if global_step % 500 == 0 and vae_wrapper is not None:
+            # 定期生成样本
+            if global_step % 500 == 0:
                 generate_latent_samples(
                     unet, vae_wrapper, noise_scheduler, 
                     epoch, global_step
                 )
+        
+        # 关闭进度条并输出epoch统计
+        progress_bar.close()
+        avg_loss = sum(epoch_losses) / len(epoch_losses)
+        print(f"Epoch {epoch+1}/{num_epochs} 完成 - 平均损失: {avg_loss:.4f}")
     
     # 保存模型
     os.makedirs(output_dir, exist_ok=True)
@@ -350,10 +390,9 @@ def train_latent_diffusion(
     pipeline_config = {
         "unet": accelerator.unwrap_model(unet).state_dict(),
         "scheduler": noise_scheduler,
+        "vae_path": vae_path,
         "latent_dir": latent_dir,
     }
-    if vae_path:
-        pipeline_config["vae_path"] = vae_path
     torch.save(pipeline_config, os.path.join(output_dir, "pipeline.pt"))
     
     print(f"模型已保存到 {output_dir}")
@@ -367,32 +406,32 @@ def generate_latent_samples(unet, vae_wrapper, scheduler, epoch, step):
     unet.eval()
     
     with torch.no_grad():
-        # 初始化latent噪声
+        # 初始化随机噪声（真实采样，非模拟数据）
         latents = torch.randn((4, 4, 32, 32), device=unet.device)
         
-        # DDIM采样（更快）
-        scheduler.set_timesteps(50)  # 只用50步
+        # DDIM采样
+        scheduler.set_timesteps(20)  # 使用20步
         
         for t in scheduler.timesteps:
             noise_pred = unet(latents, t).sample
             latents = scheduler.step(noise_pred, t, latents).prev_sample
         
-        # 解码到图像
+        # 解码到图像空间
         images = vae_wrapper.decode(latents)
-        images = (images + 1) / 2
+        images = (images + 1) / 2  # [-1,1] -> [0,1]
         images = images.clamp(0, 1).cpu()
     
     unet.train()
     
-    # 保存
+    # 保存结果
     fig, axes = plt.subplots(1, 4, figsize=(12, 3))
     for i, ax in enumerate(axes):
         ax.imshow(images[i].permute(1, 2, 0).numpy())
         ax.axis('off')
-    plt.suptitle(f'Latent Diffusion - Epoch {epoch}, Step {step}')
-    plt.savefig(f'/kaggle/working/samples_step_{step}.png')
+    plt.suptitle(f'Step {step} (Epoch {epoch+1})')
+    plt.savefig(f'/kaggle/working/samples_step_{step}.png', dpi=100, bbox_inches='tight')
     plt.close()
-    print(f"样本保存: samples_step_{step}.png")
+    print(f"  生成样本已保存: samples_step_{step}.png")
 
 
 # ============ 7. 推理pipeline ============
@@ -439,38 +478,43 @@ class LatentDiffusionPipeline:
 if __name__ == "__main__":
     # 训练
     print("="*60)
-    print("Latent Diffusion训练（使用预编码数据）")
+    print("Latent Diffusion训练")
+    print("="*60)
+    print("配置信息:")
+    print(f"  - VAE路径: /kaggle/input/kl-vae-best-pt/kl_vae_best.pt")
+    print(f"  - Latent数据: /kaggle/input/data-latent2")
+    print(f"  - 训练轮数: 30")
+    print(f"  - 批次大小: 32")
+    print(f"  - 学习率: 1e-4")
     print("="*60)
     
     unet, vae_wrapper = train_latent_diffusion(
+        vae_path="/kaggle/input/kl-vae-best-pt/kl_vae_best.pt",  # 必需！用于解码
         latent_dir="/kaggle/input/data-latent2",  # 预编码的latent
         output_dir="/kaggle/working/latent_diffusion",
         num_epochs=30,
         batch_size=32,  # latent空间可以更大batch
         learning_rate=1e-4,
-        vae_path="/kaggle/input/kl-vae-best-pt/kl_vae_best.pt",  # 可选，用于生成
     )
     
-    # 测试生成（如果有VAE）
-    if vae_wrapper is not None:
-        print("\n测试生成...")
-        scheduler = DDIMScheduler(
-            num_train_timesteps=1000,
-            beta_start=0.00085,
-            beta_end=0.012,
-        )
-        
-        pipeline = LatentDiffusionPipeline(unet, vae_wrapper, scheduler)
-        images = pipeline(batch_size=8, num_inference_steps=20)  # DDIM 20步
-        
-        # 显示结果
-        fig, axes = plt.subplots(2, 4, figsize=(12, 6))
-        for i, (ax, img) in enumerate(zip(axes.flat, images)):
-            ax.imshow(img)
-            ax.axis('off')
-        plt.suptitle('Latent Diffusion最终结果（20步DDIM）')
-        plt.savefig('/kaggle/working/final_results.png')
-    else:
-        print("\n跳过测试生成（无VAE解码器）")
+    # 测试生成
+    print("\n测试生成...")
+    scheduler = DDIMScheduler(
+        num_train_timesteps=1000,
+        beta_start=0.00085,
+        beta_end=0.012,
+    )
     
-    print("完成！")
+    pipeline = LatentDiffusionPipeline(unet, vae_wrapper, scheduler)
+    images = pipeline(batch_size=8, num_inference_steps=20)  # DDIM 20步
+    
+    # 显示结果
+    fig, axes = plt.subplots(2, 4, figsize=(12, 6))
+    for i, (ax, img) in enumerate(zip(axes.flat, images)):
+        ax.imshow(img)
+        ax.axis('off')
+    plt.suptitle('Latent Diffusion最终结果（20步DDIM）')
+    plt.savefig('/kaggle/working/final_results.png')
+    print("✓ 结果已保存到 /kaggle/working/final_results.png")
+    
+    print("\n训练完成！")
