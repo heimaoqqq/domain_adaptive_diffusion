@@ -150,29 +150,13 @@ class LatentDataset(Dataset):
         self.cache_latents = cache_latents
         self.latent_cache = {}
         
-        # 收集图像路径 - 处理8个步态类别
-        # 检查是否是顶层目录（包含所有类别）
-        if "organized-gait-dataset" in image_dir:
-            # 顶层目录，包含所有8个类别
-            base_dir = "/kaggle/input/organized-gait-dataset"
-            gait_types = [
-                'Normal_free', 'Normal_line',
-                'Backpack_free', 'Backpack_line',
-                'Bag_free', 'Bag_line',
-                'Bag_Phone_free', 'Bag_Phone_line'
-            ]
-            
-            for gait_type in gait_types:
-                subdir_path = os.path.join(base_dir, gait_type)
-                if os.path.exists(subdir_path):
-                    for img_file in os.listdir(subdir_path):
-                        if img_file.endswith(('.jpg', '.png')):
-                            self.images.append(os.path.join(subdir_path, img_file))
-        else:
-            # 单个目录
+        # 收集图像路径 - 单个目录
+        if os.path.exists(image_dir):
             for img_file in os.listdir(image_dir):
                 if img_file.endswith(('.jpg', '.png')):
                     self.images.append(os.path.join(image_dir, img_file))
+        else:
+            print(f"警告：目录不存在 {image_dir}")
         
         print(f"找到 {len(self.images)} 张图像")
         
@@ -219,7 +203,7 @@ class LatentDataset(Dataset):
 # ============ 5. Latent Diffusion训练 ============
 def train_latent_diffusion(
     vae_path="/kaggle/input/kl-vae-best-pt/kl_vae_best.pt",
-    image_dir="/kaggle/input/your-dataset",
+    image_dir="/kaggle/input/organized-gait-dataset/Normal_line",  # 只用Normal_line
     output_dir="/kaggle/working/latent_diffusion",
     num_epochs=50,
     batch_size=32,  # latent空间可以更大batch
@@ -456,7 +440,7 @@ if __name__ == "__main__":
     
     unet, vae_wrapper = train_latent_diffusion(
         vae_path="/kaggle/input/kl-vae-best-pt/kl_vae_best.pt",  # 您的VAE
-        image_dir="/kaggle/input/your-dataset",
+        image_dir="/kaggle/input/organized-gait-dataset/Normal_line",  # 只用Normal_line步态
         output_dir="/kaggle/working/latent_diffusion",
         num_epochs=30,
         batch_size=32,  # latent空间可以更大batch
