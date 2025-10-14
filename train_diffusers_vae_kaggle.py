@@ -353,9 +353,9 @@ def train_latent_diffusion(
         num_training_steps=len(dataloader) * num_epochs,
     )
     
-    # 准备训练
-    unet, optimizer, dataloader, lr_scheduler = accelerator.prepare(
-        unet, optimizer, dataloader, lr_scheduler
+    # 准备训练（包括验证集）
+    unet, optimizer, dataloader, val_dataloader, lr_scheduler = accelerator.prepare(
+        unet, optimizer, dataloader, val_dataloader, lr_scheduler
     )
     
     # 开始训练
@@ -378,6 +378,9 @@ def train_latent_diffusion(
             # 获取latent和标签
             latents = batch["latents"]
             labels = batch["labels"]  # 用户ID
+            
+            # 确保labels在正确的设备上
+            labels = labels.to(latents.device)
             
             # 标准diffusion训练
             noise = torch.randn_like(latents)
@@ -433,6 +436,9 @@ def train_latent_diffusion(
             for batch in val_dataloader:
                 latents = batch["latents"]
                 labels = batch["labels"]
+                
+                # 确保labels在正确的设备上
+                labels = labels.to(latents.device)
                 
                 noise = torch.randn_like(latents)
                 timesteps = torch.randint(
