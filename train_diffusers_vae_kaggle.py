@@ -292,17 +292,19 @@ def train_latent_diffusion(
         layers_per_block=config["layers_per_block"],
         block_out_channels=config["block_out_channels"],
         # SD官方方式：根据分辨率而非索引判断
-        # 对于32x32 latent: [32->16(i=0), 16->8(i=1), 8->4(i=2), 4->4(i=3)]
-        # attention_resolutions=[4]表示在4x4分辨率使用注意力
+        # 对于32x32 latent + 4个stage:
+        #   i=0: 32//1=32, i=1: 32//2=16, i=2: 32//4=8, i=3: 32//8=4
+        # attention_resolutions=[8]表示在8x8分辨率(i=2)使用注意力
         down_block_types=tuple(
-            ["AttnDownBlock2D" if (32 // (2**i)) in config.get("attention_resolutions", [])
-             else "DownBlock2D"
-             for i in range(len(config["block_out_channels"]))]
+            "AttnDownBlock2D" if (32 // (2**i)) in config.get("attention_resolutions", [])
+            else "DownBlock2D"
+            for i in range(len(config["block_out_channels"]))
         ),
+        # 上采样：镜像对称（第0个stage对应下采样第3个，第1个对应第2个...）
         up_block_types=tuple(
-            ["AttnUpBlock2D" if (32 // (2**i)) in config.get("attention_resolutions", [])
-             else "UpBlock2D"
-             for i in range(len(config["block_out_channels"]))][::-1]  # 上采样需要反向
+            "AttnUpBlock2D" if (32 // (2**(len(config["block_out_channels"])-1-i))) in config.get("attention_resolutions", [])
+            else "UpBlock2D"
+            for i in range(len(config["block_out_channels"]))
         ),
         attention_head_dim=8,  # SD官方标准：8个注意力头维度
         norm_num_groups=32,  # SD官方标准：32个GroupNorm组
