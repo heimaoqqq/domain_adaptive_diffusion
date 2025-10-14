@@ -260,6 +260,7 @@ def train_latent_diffusion(
     learning_rate=1e-4,  # 降低学习率配合长训练
     weight_decay=0.01,  # 添加权重衰减正则化
     sample_every_n_epochs=5,  # 每N个epoch生成可视化样本
+    early_stopping_patience=15,  # 早停：15个epoch验证损失无改善则停止
 ):
     # 加速器
     accelerator = Accelerator(mixed_precision="fp16")
@@ -301,12 +302,9 @@ def train_latent_diffusion(
         attention_head_dim=8,  # SD官方标准：8个注意力头维度
         norm_num_groups=32,  # SD官方标准：32个GroupNorm组
         act_fn="silu",  # SD官方标准：SiLU激活函数
-        # 增强条件编码
-        class_embed_type="timestep",  # 将类别嵌入加到时间步嵌入
+        # 条件编码（Diffusers的UNet2DModel默认使用加法融合）
+        class_embed_type="timestep",  # 将类别嵌入加到时间步嵌入（加法融合）
         num_class_embeds=num_classes,  # 31用户 + 1无条件
-        class_embeddings_concat=True,  # True=拼接融合，保留更多条件信息（用户差异小需要）
-        proj_class_embeddings_input_dim=None,  # 使用默认维度
-        time_embedding_dim=None,  # 自动计算
     )
     
     total_params = sum(p.numel() for p in unet.parameters()) / 1e6
@@ -374,6 +372,12 @@ def train_latent_diffusion(
     
     # 开始训练
     print(f"训练: {num_epochs}轮, 共{num_epochs * len(dataloader)}步")
+    print(f"早停机制: 验证损失{early_stopping_patience}个epoch无改善则停止")
+    
+    # 早停和最佳模型跟踪
+    best_val_loss = float('inf')
+    patience_counter = 0
+    best_model_path = None  # 跟踪最佳模型路径，用于删除旧模型
     
     # 训练循环
     global_step = 0
@@ -469,7 +473,37 @@ def train_latent_diffusion(
         avg_val_loss = sum(val_losses) / len(val_losses) if val_losses else 0
         unet.train()
         
-        print(f"Epoch {epoch+1}/{num_epochs}: train_loss={avg_train_loss:.4f}, val_loss={avg_val_loss:.4f}")
+        # 早停和最佳模型保存逻辑
+        is_best = avg_val_loss < best_val_loss
+        if is_best:
+            best_val_loss = avg_val_loss
+            patience_counter = 0
+            
+            # 保存最佳模型（删除旧的最佳模型）
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # 删除旧的最佳模型
+            if best_model_path is not None and os.path.exists(best_model_path):
+                os.remove(best_model_path)
+                print(f"删除旧模型: {os.path.basename(best_model_path)}")
+            
+            # 保存新的最佳模型
+            best_model_path = os.path.join(output_dir, f"best_unet_epoch{epoch+1}_valloss{avg_val_loss:.4f}.pt")
+            torch.save(
+                accelerator.unwrap_model(unet).state_dict(),
+                best_model_path
+            )
+            print(f"Epoch {epoch+1}/{num_epochs}: train_loss={avg_train_loss:.4f}, val_loss={avg_val_loss:.4f} ★NEW BEST★")
+        else:
+            patience_counter += 1
+            print(f"Epoch {epoch+1}/{num_epochs}: train_loss={avg_train_loss:.4f}, val_loss={avg_val_loss:.4f} (无改善 {patience_counter}/{early_stopping_patience})")
+            
+            # 检查是否触发早停
+            if patience_counter >= early_stopping_patience:
+                print(f"\n早停触发！验证损失已{early_stopping_patience}个epoch无改善")
+                print(f"最佳验证损失: {best_val_loss:.4f}")
+                print(f"最佳模型: {os.path.basename(best_model_path)}")
+                break
         
         # 每N个epoch生成可视化样本
         if (epoch + 1) % sample_every_n_epochs == 0:
@@ -478,25 +512,37 @@ def train_latent_diffusion(
                 epoch, global_step
             )
     
-    # 保存模型
+    # 训练结束后的处理
     os.makedirs(output_dir, exist_ok=True)
     
-    # 保存UNet
+    # 保存最后一个epoch的模型（作为备份）
+    last_model_path = os.path.join(output_dir, "last_unet.pt")
     torch.save(
         accelerator.unwrap_model(unet).state_dict(),
-        os.path.join(output_dir, "unet.pt")
+        last_model_path
     )
+    print(f"\n最后epoch模型已保存: {os.path.basename(last_model_path)}")
     
-    # 保存完整配置（用于推理）
+    # 创建最佳模型的符号链接（便于加载）
+    if best_model_path is not None:
+        best_link_path = os.path.join(output_dir, "best_unet.pt")
+        import shutil
+        shutil.copy(best_model_path, best_link_path)
+        print(f"最佳模型已复制: {os.path.basename(best_link_path)}")
+        print(f"  └─ 来源: {os.path.basename(best_model_path)}")
+        print(f"  └─ 最佳验证损失: {best_val_loss:.4f}")
+    
+    # 保存完整配置（用于推理，使用最佳模型）
     pipeline_config = {
-        "unet": accelerator.unwrap_model(unet).state_dict(),
         "scheduler": noise_scheduler,
         "vae_path": vae_path,
         "latent_dir": latent_dir,
+        "best_val_loss": best_val_loss,
+        "best_model_path": best_model_path,
     }
-    torch.save(pipeline_config, os.path.join(output_dir, "pipeline.pt"))
+    torch.save(pipeline_config, os.path.join(output_dir, "training_config.pt"))
     
-    print(f"模型已保存到 {output_dir}")
+    print(f"\n所有模型和配置已保存到: {output_dir}")
     
     return unet, vae_wrapper
 
@@ -625,6 +671,7 @@ if __name__ == "__main__":
         learning_rate=1e-4,  # 降低学习率配合长训练
         weight_decay=0.01,  # L2正则化
         sample_every_n_epochs=5,  # 每5个epoch生成可视化样本
+        early_stopping_patience=15,  # 早停：15个epoch验证损失无改善则停止
     )
     
     # 测试生成
