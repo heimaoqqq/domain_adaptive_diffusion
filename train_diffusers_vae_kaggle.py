@@ -259,7 +259,7 @@ def train_latent_diffusion(
     latent_dir="/kaggle/input/data-latent2",  # 预编码的latent目录
     output_dir="/kaggle/working/latent_diffusion",
     num_epochs=50,
-    batch_size=32,  # latent空间可以更大batch
+    batch_size=128,  # latent空间可以更大batch
     learning_rate=1e-4,
 ):
     # 加速器
