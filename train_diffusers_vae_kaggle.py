@@ -121,22 +121,22 @@ def get_latent_model_config():
         "nano": {  # ~5M参数
             "layers_per_block": 1,
             "block_out_channels": (128, 256, 256),
-            "attention_resolutions": [],
+            "attention_resolutions": [],  # 无注意力
         },
         "tiny": {  # ~20M参数（推荐）
             "layers_per_block": 2,
             "block_out_channels": (128, 256, 512, 512),
-            "attention_resolutions": [4],  # 在8x8分辨率
+            "attention_resolutions": [8],  # 在8x8分辨率（SD官方小模型配置）
         },
         "small": {  # ~50M参数
             "layers_per_block": 2,
             "block_out_channels": (224, 448, 672, 896),
-            "attention_resolutions": [4, 2],
+            "attention_resolutions": [8, 4],  # 在8x8和4x4（更多注意力）
         },
         "base": {  # ~860M参数（标准SD）
             "layers_per_block": 2,
             "block_out_channels": (320, 640, 1280, 1280),
-            "attention_resolutions": [4, 2, 1],
+            "attention_resolutions": [8, 4],  # SD官方在latent空间的注意力配置
         }
     }
     
@@ -235,12 +235,18 @@ class LatentDataset(Dataset):
             raise ValueError(f"意外的latent维度: {latent.shape}")
         
         # 获取标签（用户ID）用于条件扩散
-        label = self.labels[idx] if self.labels is not None else 0
+        if self.labels is not None:
+            label = self.labels[idx]
+            # 如果label已经是张量，获取其值；否则直接使用
+            if isinstance(label, torch.Tensor):
+                label = label.item()  # 转为Python标量
+        else:
+            label = 0
         
         # latent已经在prepare_microdoppler_data.py中应用了scale_factor (0.18215)
         return {
             "latents": latent,
-            "labels": torch.tensor(label, dtype=torch.long)
+            "labels": torch.tensor(label, dtype=torch.long)  # 现在label确保是Python标量
         }
 
 
@@ -249,10 +255,11 @@ def train_latent_diffusion(
     vae_path="/kaggle/input/kl-vae-best-pt/kl_vae_best.pt",  # 必需！用于解码
     latent_dir="/kaggle/input/data-latent2",  # 预编码的latent目录
     output_dir="/kaggle/working/latent_diffusion",
-    num_epochs=50,
+    num_epochs=200,
     batch_size=64,  # 增大batch size（还有10G显存）
-    learning_rate=2e-4,  # 稍微增大学习率配合大batch
+    learning_rate=1e-4,  # 降低学习率配合长训练
     weight_decay=0.01,  # 添加权重衰减正则化
+    sample_every_n_epochs=5,  # 每N个epoch生成可视化样本
 ):
     # 加速器
     accelerator = Accelerator(mixed_precision="fp16")
@@ -267,32 +274,39 @@ def train_latent_diffusion(
     # 获取latent模型配置
     config = get_latent_model_config()
     
-    # 创建条件UNet（支持用户ID作为条件）
-    # Normal_line有31个用户（ID_01到ID_31）
-    num_classes = 31
+    # 创建条件UNet（增强条件编码能力）
+    # Normal_line有31个用户（ID_01到ID_31）+ 1个无条件标签
+    num_classes = 32  # 31个用户 + 1个无条件(用于classifier-free guidance)
     
+    # 增强配置：用户差异小，需要更强的条件编码
     unet = UNet2DModel(
         sample_size=32,  # latent大小
         in_channels=4,   # VAE latent channels
         out_channels=4,
         layers_per_block=config["layers_per_block"],
         block_out_channels=config["block_out_channels"],
+        # SD官方方式：根据分辨率而非索引判断
+        # 对于32x32 latent: [32->16(i=0), 16->8(i=1), 8->4(i=2), 4->4(i=3)]
+        # attention_resolutions=[4]表示在4x4分辨率使用注意力
         down_block_types=tuple(
-            ["DownBlock2D" if i not in config["attention_resolutions"] 
-             else "AttnDownBlock2D" 
+            ["AttnDownBlock2D" if (32 // (2**i)) in config.get("attention_resolutions", [])
+             else "DownBlock2D"
              for i in range(len(config["block_out_channels"]))]
         ),
         up_block_types=tuple(
-            ["UpBlock2D" if i not in config["attention_resolutions"]
-             else "AttnUpBlock2D"
-             for i in range(len(config["block_out_channels"]))]
+            ["AttnUpBlock2D" if (32 // (2**i)) in config.get("attention_resolutions", [])
+             else "UpBlock2D"
+             for i in range(len(config["block_out_channels"]))][::-1]  # 上采样需要反向
         ),
-        attention_head_dim=8,
-        norm_num_groups=32,
-        act_fn="silu",
-        # 添加条件编码
-        class_embed_type="timestep",  # 将类别嵌入添加到时间步嵌入
-        num_class_embeds=num_classes,  # 用户数
+        attention_head_dim=8,  # SD官方标准：8个注意力头维度
+        norm_num_groups=32,  # SD官方标准：32个GroupNorm组
+        act_fn="silu",  # SD官方标准：SiLU激活函数
+        # 增强条件编码
+        class_embed_type="timestep",  # 将类别嵌入加到时间步嵌入
+        num_class_embeds=num_classes,  # 31用户 + 1无条件
+        class_embeddings_concat=True,  # True=拼接融合，保留更多条件信息（用户差异小需要）
+        proj_class_embeddings_input_dim=None,  # 使用默认维度
+        time_embedding_dim=None,  # 自动计算
     )
     
     total_params = sum(p.numel() for p in unet.parameters()) / 1e6
@@ -363,6 +377,7 @@ def train_latent_diffusion(
     
     # 训练循环
     global_step = 0
+    num_uncond_label = 31  # 使用31作为无条件标签（超出用户ID范围）
     for epoch in range(num_epochs):
         # 使用leave=True保持每个epoch的进度条不消失
         progress_bar = tqdm(
@@ -391,11 +406,18 @@ def train_latent_diffusion(
             
             noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
             
+            # 10%概率使用无条件训练（增强条件效果）
+            if torch.rand(1).item() < 0.1:
+                # Classifier-free guidance训练：随机丢弃条件
+                uncond_labels = torch.full_like(labels, num_uncond_label)  # 使用31作为无条件标签
+            else:
+                uncond_labels = labels
+            
             # 条件预测噪声（传入用户ID作为类别条件）
             noise_pred = unet(
                 noisy_latents, 
                 timesteps,
-                class_labels=labels  # 条件信息
+                class_labels=uncond_labels  # 条件信息或无条件
             ).sample
             loss = F.mse_loss(noise_pred, noise)
             
@@ -417,13 +439,6 @@ def train_latent_diffusion(
             })
             
             global_step += 1
-            
-            # 定期生成样本
-            if global_step % 500 == 0:
-                generate_latent_samples(
-                    unet, vae_wrapper, noise_scheduler, 
-                    epoch, global_step
-                )
         
         # 关闭进度条并输出epoch统计
         progress_bar.close()
@@ -455,6 +470,13 @@ def train_latent_diffusion(
         unet.train()
         
         print(f"Epoch {epoch+1}/{num_epochs}: train_loss={avg_train_loss:.4f}, val_loss={avg_val_loss:.4f}")
+        
+        # 每N个epoch生成可视化样本
+        if (epoch + 1) % sample_every_n_epochs == 0:
+            generate_latent_samples(
+                unet, vae_wrapper, noise_scheduler, 
+                epoch, global_step
+            )
     
     # 保存模型
     os.makedirs(output_dir, exist_ok=True)
@@ -480,7 +502,7 @@ def train_latent_diffusion(
 
 
 # ============ 6. 生成样本 ============
-def generate_latent_samples(unet, vae_wrapper, scheduler, epoch, step):
+def generate_latent_samples(unet, vae_wrapper, scheduler, epoch, step, guidance_scale=3.5):
     """条件生成样本（选择4个不同用户）"""
     unet.eval()
     
@@ -492,13 +514,23 @@ def generate_latent_samples(unet, vae_wrapper, scheduler, epoch, step):
         # 选择不同的用户ID进行条件生成
         # 选择用户 0, 7, 14, 21（分散选择）
         class_labels = torch.tensor([0, 7, 14, 21], device=unet.device, dtype=torch.long)
+        uncond_labels = torch.full_like(class_labels, 31)  # 无条件标签
         
-        # DDIM采样（50步）
-        scheduler.set_timesteps(50)  
+        # DDIM采样（100步，提高质量）
+        scheduler.set_timesteps(100)  
         
         for t in scheduler.timesteps:
             # 条件生成
-            noise_pred = unet(latents, t, class_labels=class_labels).sample
+            noise_pred_cond = unet(latents, t, class_labels=class_labels).sample
+            
+            if guidance_scale > 1.0:
+                # 无条件预测
+                noise_pred_uncond = unet(latents, t, class_labels=uncond_labels).sample
+                # Classifier-free guidance
+                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
+            else:
+                noise_pred = noise_pred_cond
+                
             latents = scheduler.step(noise_pred, t, latents).prev_sample
         
         # 解码到图像空间
@@ -513,8 +545,9 @@ def generate_latent_samples(unet, vae_wrapper, scheduler, epoch, step):
     for i, ax in enumerate(axes):
         ax.imshow(images[i].permute(1, 2, 0).numpy())
         ax.axis('off')
-    plt.suptitle(f'Step {step} (Epoch {epoch+1})')
-    plt.savefig(f'/kaggle/working/samples_step_{step}.png', dpi=100, bbox_inches='tight')
+        ax.set_title(f'User {class_labels[i].item()}')
+    plt.suptitle(f'Epoch {epoch+1} (100-step DDIM, guidance=3.5)')
+    plt.savefig(f'/kaggle/working/samples_epoch_{epoch+1}.png', dpi=100, bbox_inches='tight')
     plt.close()
 
 
@@ -528,7 +561,7 @@ class LatentDiffusionPipeline:
         self.scheduler = scheduler
     
     @torch.no_grad()
-    def __call__(self, batch_size=4, num_inference_steps=50, ddim=True, class_labels=None):
+    def __call__(self, batch_size=4, num_inference_steps=50, ddim=True, class_labels=None, guidance_scale=2.0):
         # 使用DDIM加速
         if ddim:
             self.scheduler = DDIMScheduler.from_config(self.scheduler.config)
@@ -548,9 +581,22 @@ class LatentDiffusionPipeline:
         elif not isinstance(class_labels, torch.Tensor):
             class_labels = torch.tensor(class_labels, device=self.unet.device, dtype=torch.long)
         
-        # 条件去噪循环
+        # 准备无条件标签（用于classifier-free guidance）
+        uncond_labels = torch.full_like(class_labels, 31)  # 使用31作为无条件标签
+        
+        # 条件去噪循环（支持classifier-free guidance）
         for t in tqdm(self.scheduler.timesteps, desc="生成中"):
-            noise_pred = self.unet(latents, t, class_labels=class_labels).sample
+            # 条件预测
+            noise_pred_cond = self.unet(latents, t, class_labels=class_labels).sample
+            
+            if guidance_scale > 1.0:
+                # 无条件预测
+                noise_pred_uncond = self.unet(latents, t, class_labels=uncond_labels).sample
+                # Classifier-free guidance
+                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
+            else:
+                noise_pred = noise_pred_cond
+            
             latents = self.scheduler.step(noise_pred, t, latents).prev_sample
         
         # 解码
@@ -574,10 +620,11 @@ if __name__ == "__main__":
         vae_path="/kaggle/input/kl-vae-best-pt/kl_vae_best.pt",  # 必需！用于解码
         latent_dir="/kaggle/input/data-latent2",  # 预编码的latent
         output_dir="/kaggle/working/latent_diffusion",
-        num_epochs=50,  # 训练更多轮次
+        num_epochs=200,  # 增加到200轮（约12.8K步，更充分训练）
         batch_size=64,  # 增大batch size（有10G空余显存）
-        learning_rate=2e-4,  # 稍微提高学习率配合大batch
+        learning_rate=1e-4,  # 降低学习率配合长训练
         weight_decay=0.01,  # L2正则化
+        sample_every_n_epochs=5,  # 每5个epoch生成可视化样本
     )
     
     # 测试生成
@@ -594,8 +641,9 @@ if __name__ == "__main__":
     selected_users = [0, 4, 8, 12, 16, 20, 24, 28]  # 均匀分布的用户ID
     images = pipeline(
         batch_size=8, 
-        num_inference_steps=50,  # DDIM 50步
-        class_labels=selected_users  # 指定用户
+        num_inference_steps=100,  # DDIM 100步（提高细节和锐利度）
+        class_labels=selected_users,  # 指定用户
+        guidance_scale=3.5  # 提高guidance强度（用户差异小时需要更强的条件引导）
     )
     
     # 保存结果
@@ -604,7 +652,7 @@ if __name__ == "__main__":
         ax.imshow(img)
         ax.axis('off')
         ax.set_title(f'User {selected_users[i]}')
-    plt.suptitle('Conditional Generation (50-step DDIM)')
+    plt.suptitle('Conditional Generation (100-step DDIM, guidance=3.5)')
     plt.savefig('/kaggle/working/final_results.png')
     plt.close()
     
