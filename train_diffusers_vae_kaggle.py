@@ -140,8 +140,8 @@ def get_latent_model_config():
         }
     }
     
-    # 对latent训练，推荐tiny
-    selected = "tiny"  # ← 修改这里选择大小
+    # 对latent训练，数据量小用nano避免过拟合
+    selected = "nano"  # ← 数据量4K，用nano（~5M参数）避免过拟合
     config = configs[selected]
     
     print(f"使用 {selected} Latent Diffusion配置:")
@@ -257,10 +257,10 @@ def train_latent_diffusion(
     output_dir="/kaggle/working/latent_diffusion",
     num_epochs=200,
     batch_size=64,  # 增大batch size（还有10G显存）
-    learning_rate=1e-4,  # 降低学习率配合长训练
-    weight_decay=0.01,  # 添加权重衰减正则化
+    learning_rate=5e-5,  # 降低学习率防止快速过拟合（从1e-4降到5e-5）
+    weight_decay=0.02,  # 增强L2正则化（从0.01提高到0.02）
     sample_every_n_epochs=5,  # 每N个epoch生成可视化样本
-    early_stopping_patience=15,  # 早停：15个epoch验证损失无改善则停止
+    early_stopping_patience=10,  # 早停：10个epoch验证损失无改善则停止（小数据集快速收敛）
 ):
     # 加速器
     accelerator = Accelerator(mixed_precision="fp16")
@@ -666,12 +666,12 @@ if __name__ == "__main__":
         vae_path="/kaggle/input/kl-vae-best-pt/kl_vae_best.pt",  # 必需！用于解码
         latent_dir="/kaggle/input/data-latent2",  # 预编码的latent
         output_dir="/kaggle/working/latent_diffusion",
-        num_epochs=200,  # 增加到200轮（约12.8K步，更充分训练）
+        num_epochs=200,  # 最多200轮（早停会提前结束）
         batch_size=64,  # 增大batch size（有10G空余显存）
-        learning_rate=1e-4,  # 降低学习率配合长训练
-        weight_decay=0.01,  # L2正则化
+        learning_rate=5e-5,  # 降低学习率防止快速过拟合
+        weight_decay=0.02,  # 增强L2正则化
         sample_every_n_epochs=5,  # 每5个epoch生成可视化样本
-        early_stopping_patience=15,  # 早停：15个epoch验证损失无改善则停止
+        early_stopping_patience=10,  # 早停：10个epoch验证损失无改善则停止
     )
     
     # 测试生成
