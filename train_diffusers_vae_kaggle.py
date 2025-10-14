@@ -26,27 +26,33 @@ import matplotlib.pyplot as plt
 # ============ 1. 加载您的VAE ============
 def load_pretrained_vae(vae_path="/kaggle/input/kl-vae-best-pt/kl_vae_best.pt"):
     """
-    加载您已训练好的VAE
-    如果格式不兼容，可以用diffusers的VAE
+    加载已训练好的KL-VAE模型
+    与prepare_microdoppler_data.py保持一致
     """
     try:
-        # 尝试加载您的VAE
-        print(f"加载VAE: {vae_path}")
+        # 加载KL-VAE checkpoint
+        print(f"加载KL-VAE: {vae_path}")
         
-        # 如果是您自己训练的simplified_vavae
+        # 加载KL-VAE
         import sys
-        # 添加多个可能的路径
-        for path in ['/kaggle/working', '/kaggle/input/va-vae', '.']:
-            if path not in sys.path:
-                sys.path.append(path)
+        import os
         
-        from simplified_vavae import VAVAE
+        # 添加VAE模块路径
+        vae_path_dir = '/kaggle/working/domain_adaptive_diffusion/vae'
+        if vae_path_dir not in sys.path:
+            sys.path.insert(0, vae_path_dir)
         
-        vae = VAVAE(
-            in_channels=3,
-            latent_dim=4,
-            hidden_dims=[128, 256, 512, 512],
-        )
+        # 检查kl_vae.py是否存在
+        kl_vae_file = os.path.join(vae_path_dir, 'kl_vae.py')
+        if not os.path.exists(kl_vae_file):
+            raise ImportError(f"找不到kl_vae.py文件: {kl_vae_file}")
+        
+        print(f"找到kl_vae.py在: {vae_path_dir}")
+        
+        from kl_vae import KL_VAE
+        
+        # 创建KL-VAE模型（与prepare_microdoppler_data.py一致）
+        vae = KL_VAE()
         
         checkpoint = torch.load(vae_path, map_location='cpu')
         if 'model_state_dict' in checkpoint:
@@ -54,55 +60,59 @@ def load_pretrained_vae(vae_path="/kaggle/input/kl-vae-best-pt/kl_vae_best.pt"):
         else:
             vae.load_state_dict(checkpoint)
         
-        print("成功加载自定义VAE")
-        return vae, "custom"
+        print("✓ 成功加载KL-VAE")
+        return vae, "kl_vae"
         
     except Exception as e:
-        print(f"加载自定义VAE失败: {e}")
-        # 备选：使用diffusers的预训练VAE
-        print("尝试使用Diffusers的VAE作为备选...")
-        try:
-            vae = AutoencoderKL.from_pretrained(
-                "stabilityai/sd-vae-ft-mse",
-                torch_dtype=torch.float16
-            )
-            return vae, "diffusers"
-        except:
-            raise ValueError("无法加载VAE模型，请检查路径和格式")
+        print(f"="*60)
+        print(f"错误：加载KL-VAE失败！")
+        print(f"原因：{e}")
+        print(f"VAE路径：{vae_path}")
+        print(f"="*60)
+        print("请检查：")
+        print("1. VAE checkpoint路径是否正确：/kaggle/input/kl-vae-best-pt/kl_vae_best.pt")
+        print("2. kl_vae.py是否在：/kaggle/working/domain_adaptive_diffusion/vae/")
+        print("3. VAE checkpoint格式是否包含'model_state_dict'键")
+        print(f"="*60)
+        import sys
+        sys.exit(1)  # 直接退出程序
 
 
 # ============ 2. VAE包装器（统一接口）============
 class VAEWrapper:
     """统一不同VAE的接口"""
     
-    def __init__(self, vae, vae_type="custom"):
+    def __init__(self, vae, vae_type="kl_vae"):
         self.vae = vae
         self.vae_type = vae_type
-        self.scaling_factor = 0.18215  # SD标准缩放
+        # KL-VAE已经内置了scale_factor (0.18215)
         
     def encode(self, x):
-        """编码到latent"""
-        if self.vae_type == "custom":
-            # 您的VAE
+        """编码到latent（用于实时编码，这里不需要因为用预编码数据）"""
+        if self.vae_type == "kl_vae":
+            # KL-VAE的encode_images方法已经应用了scale_factor
             with torch.no_grad():
-                mu, logvar = self.vae.encode(x)
-                z = self.vae.reparameterize(mu, logvar)
-                return z * self.scaling_factor
+                # x应该在[0,1]范围
+                return self.vae.encode_images(x)
         else:
             # Diffusers VAE
             with torch.no_grad():
                 latent = self.vae.encode(x).latent_dist.sample()
-                return latent * self.scaling_factor
+                return latent * 0.18215
     
     def decode(self, z):
         """解码到图像"""
-        z = z / self.scaling_factor
-        
-        if self.vae_type == "custom":
+        if self.vae_type == "kl_vae":
+            # KL-VAE的decode_latents方法处理scale_factor
             with torch.no_grad():
-                return self.vae.decode(z)
+                # decode_latents会自动处理scale_factor并clamp到[0,1]
+                images = self.vae.decode_latents(z)
+                # 转换到[-1,1]范围（用于可视化）
+                return images * 2.0 - 1.0
         else:
+            # Diffusers VAE
             with torch.no_grad():
+                z = z / 0.18215
                 return self.vae.decode(z).sample
 
 
@@ -184,30 +194,46 @@ class LatentDataset(Dataset):
             else:
                 raise ValueError(f"未知数据格式: {type(data)}")
             
-            print(f"加载 {len(self.latents)} 个latent样本")
-            print(f"Latent形状: {self.latents[0].shape if len(self.latents) > 0 else 'N/A'}")
+            # 检查数据是否为空
+            if self.latents is None or len(self.latents) == 0:
+                print(f"="*60)
+                print("错误：latent数据为空！")
+                print(f"数据文件：{data_path}")
+                print(f"="*60)
+                import sys
+                sys.exit(1)
             
-            # 加载统计信息（用于归一化）
+            print(f"加载 {len(self.latents)} 个latent样本")
+            print(f"Latent形状: {self.latents[0].shape}")
+            
+            # 加载数据统计信息（元数据）
             stats_path = os.path.join(latent_dir, "data_stats.pt")
             if os.path.exists(stats_path):
                 self.stats = torch.load(stats_path, map_location='cpu')
-                # 提取mean和std的值
-                mean_val = self.stats.get('mean', None)
-                std_val = self.stats.get('std', None)
-                if mean_val is not None and std_val is not None:
-                    if isinstance(mean_val, torch.Tensor):
-                        mean_val = mean_val.mean().item()
-                    if isinstance(std_val, torch.Tensor):
-                        std_val = std_val.mean().item()
-                    print(f"加载统计信息: mean={mean_val:.4f}, std={std_val:.4f}")
-                else:
-                    print("统计信息格式未知，跳过归一化")
-                    self.stats = None
+                # 这是元数据，不是mean/std
+                print(f"数据信息:")
+                print(f"  - 源域: {self.stats.get('source_domain', 'N/A')}")
+                print(f"  - 目标域: {self.stats.get('target_domain', 'N/A')}")
+                print(f"  - Latent形状: {self.stats.get('latent_shape', 'N/A')}")
+                print(f"  - Scale factor: {self.stats.get('scale_factor', 0.18215)}")
+                print(f"  - 输入范围: {self.stats.get('input_range', '[0,1]')}")
+                # 注意：latent已经在prepare_microdoppler_data.py中通过encode_images应用了scale_factor
+                # 所以不需要额外的归一化
             else:
-                print("未找到统计信息文件，使用原始latent")
+                print("未找到统计信息文件")
                 self.stats = None
         else:
-            raise FileNotFoundError(f"找不到数据文件: {data_path}")
+            print(f"="*60)
+            print(f"错误：找不到latent数据文件！")
+            print(f"文件路径：{data_path}")
+            print(f"="*60)
+            print("请检查：")
+            print("1. 数据集是否正确上传到Kaggle")
+            print("2. 路径是否正确：/kaggle/input/data-latent2/")
+            print("3. 文件名是否正确：source_train.pt")
+            print(f"="*60)
+            import sys
+            sys.exit(1)  # 直接退出程序
     
     def __len__(self):
         return len(self.latents)
@@ -215,13 +241,15 @@ class LatentDataset(Dataset):
     def __getitem__(self, idx):
         latent = self.latents[idx]
         
-        # 确保是3维张量 [C, H, W]
+        # 确保是3维张量 [C, H, W]，其中C=4 (KL-VAE的latent维度)
         if latent.dim() == 4 and latent.shape[0] == 1:
-            latent = latent.squeeze(0)  # 去掉第一维 [1, C, H, W] -> [C, H, W]
+            latent = latent.squeeze(0)  # [1, 4, 32, 32] -> [4, 32, 32]
         elif latent.dim() == 2:
-            latent = latent.unsqueeze(0)  # 添加通道维 [H, W] -> [1, H, W]
+            # 不应该出现这种情况，但以防万一
+            raise ValueError(f"意外的latent维度: {latent.shape}")
         
-        # 不做任何数据增强，直接返回原始latent
+        # latent已经在prepare_microdoppler_data.py中应用了scale_factor (0.18215)
+        # 直接返回，不需要额外处理
         return {"latents": latent}
 
 
@@ -239,12 +267,18 @@ def train_latent_diffusion(
     
     # 加载VAE（必需，用于生成时解码）
     print("="*60)
-    print("加载VAE模型...")
+    print("步骤1：加载VAE模型...")
     vae_model, vae_type = load_pretrained_vae(vae_path)
     vae_model.cuda()
     vae_model.eval()  # VAE保持eval模式
     vae_wrapper = VAEWrapper(vae_model, vae_type)
     print(f"✓ VAE加载成功 (类型: {vae_type})")
+    
+    # 确认VAE结构
+    if vae_type == "kl_vae":
+        print(f"  - Encoder下采样: 8x (256x256 -> 32x32)")
+        print(f"  - Latent channels: 4")
+        print(f"  - Scale factor: 0.18215 (已内置)")
     print("="*60)
     
     # 获取latent模型配置
@@ -276,16 +310,28 @@ def train_latent_diffusion(
     print(f"UNet参数: {total_params:.1f}M")
     
     # 数据集（使用预编码的latent）
+    print("步骤2：加载预编码latent数据...")
     dataset = LatentDataset(
         latent_dir=latent_dir,
         split="train"  # 使用训练集
     )
+    
+    # 验证数据集
+    if len(dataset) == 0:
+        print("="*60)
+        print("错误：数据集为空！")
+        print("="*60)
+        import sys
+        sys.exit(1)
+    
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=True,
         num_workers=0  # latent已缓存，不需要多进程
     )
+    print(f"✓ 数据集加载成功，共{len(dataset)}个样本")
+    print("="*60)
     
     # 噪声调度器
     noise_scheduler = DDPMScheduler(
@@ -315,6 +361,13 @@ def train_latent_diffusion(
     unet, optimizer, dataloader, lr_scheduler = accelerator.prepare(
         unet, optimizer, dataloader, lr_scheduler
     )
+    
+    # 开始训练前的确认
+    print("步骤3：开始训练")
+    print(f"  - 每个epoch {len(dataloader)} 个批次")
+    print(f"  - 总计 {num_epochs * len(dataloader)} 个训练步")
+    print(f"  - 每500步生成一次样本")
+    print("="*60)
     
     # 训练循环
     global_step = 0
