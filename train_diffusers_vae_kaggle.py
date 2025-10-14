@@ -675,7 +675,8 @@ def generate_latent_samples(unet, class_conditioner, vae_wrapper, scheduler, epo
             if guidance_scale > 1.0:
                 # 合并条件和无条件输入
                 latent_input = torch.cat([latents] * 2)
-                t_input = torch.cat([t.unsqueeze(0)] * 2)
+                # 正确扩展时间步以匹配batch大小
+                t_input = t.unsqueeze(0).expand(latent_input.shape[0])
                 
                 # 条件嵌入
                 cond_emb = class_conditioner(class_labels)
@@ -754,7 +755,8 @@ class LatentDiffusionPipeline:
             if guidance_scale > 1.0:
                 # Classifier-Free Guidance（合并batch）
                 latent_input = torch.cat([latents] * 2)
-                t_input = torch.cat([t.unsqueeze(0)] * 2)
+                # 正确扩展时间步以匹配batch大小
+                t_input = t.unsqueeze(0).expand(latent_input.shape[0])
                 
                 # 条件嵌入
                 cond_emb = self.class_conditioner(class_labels)
