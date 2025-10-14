@@ -140,83 +140,92 @@ def get_latent_model_config():
     return config
 
 
-# ============ 4. 数据集（编码到latent）============
+# ============ 4. 数据集（直接加载预编码的latent）============
 class LatentDataset(Dataset):
-    """预先编码到latent空间的数据集"""
+    """直接加载预编码的latent数据"""
     
-    def __init__(self, image_dir, vae_wrapper, cache_latents=True):
-        self.images = []
-        self.vae_wrapper = vae_wrapper
-        self.cache_latents = cache_latents
-        self.latent_cache = {}
+    def __init__(self, latent_dir="/kaggle/input/data-latent2", split="train"):
+        """
+        latent_dir: 包含预编码latent的目录
+        split: "train" 或 "val"
+        """
+        self.latent_dir = latent_dir
+        self.split = split
         
-        # 收集图像路径 - 单个目录
-        if os.path.exists(image_dir):
-            for img_file in os.listdir(image_dir):
-                if img_file.endswith(('.jpg', '.png')):
-                    self.images.append(os.path.join(image_dir, img_file))
+        # 加载对应的数据文件
+        if split == "train":
+            data_path = os.path.join(latent_dir, "source_train.pt")
+        elif split == "val":
+            data_path = os.path.join(latent_dir, "source_val.pt")
         else:
-            print(f"警告：目录不存在 {image_dir}")
+            data_path = os.path.join(latent_dir, "target_fewshot.pt")
         
-        print(f"找到 {len(self.images)} 张图像")
+        print(f"加载预编码latent: {data_path}")
         
-        # 图像预处理
-        self.transform = transforms.Compose([
-            transforms.Resize(256),
-            transforms.CenterCrop(256),
-            transforms.ToTensor(),
-            transforms.Normalize([0.5], [0.5])
-        ])
-        
-        # 可选：预编码所有图像
-        if cache_latents:
-            self._precompute_latents()
-    
-    def _precompute_latents(self):
-        """预计算所有latent（加速训练）"""
-        print("预编码图像到latent空间...")
-        self.vae_wrapper.vae.eval()
-        
-        with torch.no_grad():
-            for idx in tqdm(range(len(self.images))):
-                if idx not in self.latent_cache:
-                    image = Image.open(self.images[idx]).convert('RGB')
-                    image = self.transform(image).unsqueeze(0).cuda()
-                    latent = self.vae_wrapper.encode(image)
-                    self.latent_cache[idx] = latent.cpu()
-        
-        print(f"预编码完成！Latent形状: {self.latent_cache[0].shape}")
+        # 加载数据
+        if os.path.exists(data_path):
+            data = torch.load(data_path, map_location='cpu')
+            
+            # 检查数据格式
+            if isinstance(data, dict):
+                self.latents = data.get('latents', data.get('data', None))
+                self.labels = data.get('labels', None)
+            elif isinstance(data, torch.Tensor):
+                self.latents = data
+                self.labels = None
+            else:
+                raise ValueError(f"未知数据格式: {type(data)}")
+            
+            print(f"加载 {len(self.latents)} 个latent样本")
+            print(f"Latent形状: {self.latents[0].shape if len(self.latents) > 0 else 'N/A'}")
+            
+            # 加载统计信息（用于归一化）
+            stats_path = os.path.join(latent_dir, "data_stats.pt")
+            if os.path.exists(stats_path):
+                self.stats = torch.load(stats_path, map_location='cpu')
+                print(f"加载统计信息: mean={self.stats.get('mean', 'N/A')}, std={self.stats.get('std', 'N/A')}")
+            else:
+                self.stats = None
+        else:
+            raise FileNotFoundError(f"找不到数据文件: {data_path}")
     
     def __len__(self):
-        return len(self.images)
+        return len(self.latents)
     
     def __getitem__(self, idx):
-        if self.cache_latents and idx in self.latent_cache:
-            return {"latents": self.latent_cache[idx].squeeze(0)}
-        else:
-            # 实时编码
-            image = Image.open(self.images[idx]).convert('RGB')
-            image = self.transform(image)
-            return {"images": image}
+        latent = self.latents[idx]
+        
+        # 确保是4维张量 [C, H, W]
+        if latent.dim() == 3:
+            latent = latent.unsqueeze(0)  # 添加batch维度
+        
+        # 如果是5维 [1, C, H, W]，去掉第一维
+        if latent.dim() == 4 and latent.shape[0] == 1:
+            latent = latent.squeeze(0)
+        
+        return {"latents": latent}
 
 
 # ============ 5. Latent Diffusion训练 ============
 def train_latent_diffusion(
-    vae_path="/kaggle/input/kl-vae-best-pt/kl_vae_best.pt",
-    image_dir="/kaggle/input/organized-gait-dataset/Normal_line",  # 只用Normal_line
+    latent_dir="/kaggle/input/data-latent2",  # 预编码的latent目录
     output_dir="/kaggle/working/latent_diffusion",
     num_epochs=50,
     batch_size=32,  # latent空间可以更大batch
     learning_rate=1e-4,
+    vae_path=None,  # 可选，用于生成时解码
 ):
     # 加速器
     accelerator = Accelerator(mixed_precision="fp16")
     
-    # 加载VAE
-    vae_model, vae_type = load_pretrained_vae(vae_path)
-    vae_model.cuda()
-    vae_model.eval()  # VAE保持eval模式
-    vae_wrapper = VAEWrapper(vae_model, vae_type)
+    # 如果提供了VAE路径，加载用于生成时解码（可选）
+    vae_wrapper = None
+    if vae_path and os.path.exists(vae_path):
+        vae_model, vae_type = load_pretrained_vae(vae_path)
+        vae_model.cuda()
+        vae_model.eval()
+        vae_wrapper = VAEWrapper(vae_model, vae_type)
+        print("加载VAE用于样本生成")
     
     # 获取latent模型配置
     config = get_latent_model_config()
@@ -246,11 +255,10 @@ def train_latent_diffusion(
     total_params = sum(p.numel() for p in unet.parameters()) / 1e6
     print(f"UNet参数: {total_params:.1f}M")
     
-    # 数据集（预编码到latent）
+    # 数据集（使用预编码的latent）
     dataset = LatentDataset(
-        image_dir, 
-        vae_wrapper, 
-        cache_latents=True  # 预计算latent加速
+        latent_dir=latent_dir,
+        split="train"  # 使用训练集
     )
     dataloader = DataLoader(
         dataset,
@@ -294,13 +302,8 @@ def train_latent_diffusion(
         progress_bar = tqdm(total=len(dataloader), desc=f"Epoch {epoch+1}/{num_epochs}")
         
         for batch in dataloader:
-            # 获取latent
-            if "latents" in batch:
-                latents = batch["latents"]
-            else:
-                # 实时编码
-                with torch.no_grad():
-                    latents = vae_wrapper.encode(batch["images"])
+            # 直接获取预编码的latent
+            latents = batch["latents"]
             
             # 标准diffusion训练
             noise = torch.randn_like(latents)
@@ -327,8 +330,8 @@ def train_latent_diffusion(
             
             global_step += 1
             
-            # 定期生成样本
-            if global_step % 500 == 0:
+            # 定期生成样本（如果有VAE）
+            if global_step % 500 == 0 and vae_wrapper is not None:
                 generate_latent_samples(
                     unet, vae_wrapper, noise_scheduler, 
                     epoch, global_step
@@ -347,9 +350,10 @@ def train_latent_diffusion(
     pipeline_config = {
         "unet": accelerator.unwrap_model(unet).state_dict(),
         "scheduler": noise_scheduler,
-        "vae_path": vae_path,
-        "vae_type": vae_type,
+        "latent_dir": latent_dir,
     }
+    if vae_path:
+        pipeline_config["vae_path"] = vae_path
     torch.save(pipeline_config, os.path.join(output_dir, "pipeline.pt"))
     
     print(f"模型已保存到 {output_dir}")
@@ -435,34 +439,38 @@ class LatentDiffusionPipeline:
 if __name__ == "__main__":
     # 训练
     print("="*60)
-    print("Latent Diffusion训练（使用预训练VAE）")
+    print("Latent Diffusion训练（使用预编码数据）")
     print("="*60)
     
     unet, vae_wrapper = train_latent_diffusion(
-        vae_path="/kaggle/input/kl-vae-best-pt/kl_vae_best.pt",  # 您的VAE
-        image_dir="/kaggle/input/organized-gait-dataset/Normal_line",  # 只用Normal_line步态
+        latent_dir="/kaggle/input/data-latent2",  # 预编码的latent
         output_dir="/kaggle/working/latent_diffusion",
         num_epochs=30,
         batch_size=32,  # latent空间可以更大batch
         learning_rate=1e-4,
+        vae_path="/kaggle/input/kl-vae-best-pt/kl_vae_best.pt",  # 可选，用于生成
     )
     
-    # 测试生成
-    print("\n测试生成...")
-    scheduler = DDIMScheduler(
-        num_train_timesteps=1000,
-        beta_start=0.00085,
-        beta_end=0.012,
-    )
+    # 测试生成（如果有VAE）
+    if vae_wrapper is not None:
+        print("\n测试生成...")
+        scheduler = DDIMScheduler(
+            num_train_timesteps=1000,
+            beta_start=0.00085,
+            beta_end=0.012,
+        )
+        
+        pipeline = LatentDiffusionPipeline(unet, vae_wrapper, scheduler)
+        images = pipeline(batch_size=8, num_inference_steps=20)  # DDIM 20步
+        
+        # 显示结果
+        fig, axes = plt.subplots(2, 4, figsize=(12, 6))
+        for i, (ax, img) in enumerate(zip(axes.flat, images)):
+            ax.imshow(img)
+            ax.axis('off')
+        plt.suptitle('Latent Diffusion最终结果（20步DDIM）')
+        plt.savefig('/kaggle/working/final_results.png')
+    else:
+        print("\n跳过测试生成（无VAE解码器）")
     
-    pipeline = LatentDiffusionPipeline(unet, vae_wrapper, scheduler)
-    images = pipeline(batch_size=8, num_inference_steps=20)  # DDIM 20步
-    
-    # 显示结果
-    fig, axes = plt.subplots(2, 4, figsize=(12, 6))
-    for i, (ax, img) in enumerate(zip(axes.flat, images)):
-        ax.imshow(img)
-        ax.axis('off')
-    plt.suptitle('Latent Diffusion最终结果（20步DDIM）')
-    plt.savefig('/kaggle/working/final_results.png')
     print("完成！")
