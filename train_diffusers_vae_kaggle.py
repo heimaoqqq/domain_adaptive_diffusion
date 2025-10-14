@@ -30,9 +30,6 @@ def load_pretrained_vae(vae_path="/kaggle/input/kl-vae-best-pt/kl_vae_best.pt"):
     与prepare_microdoppler_data.py保持一致
     """
     try:
-        # 加载KL-VAE checkpoint
-        print(f"加载KL-VAE: {vae_path}")
-        
         # 加载KL-VAE
         import sys
         import os
@@ -47,8 +44,6 @@ def load_pretrained_vae(vae_path="/kaggle/input/kl-vae-best-pt/kl_vae_best.pt"):
         if not os.path.exists(kl_vae_file):
             raise ImportError(f"找不到kl_vae.py文件: {kl_vae_file}")
         
-        print(f"找到kl_vae.py在: {vae_path_dir}")
-        
         from kl_vae import KL_VAE
         
         # 创建KL-VAE模型（与prepare_microdoppler_data.py一致）
@@ -60,7 +55,6 @@ def load_pretrained_vae(vae_path="/kaggle/input/kl-vae-best-pt/kl_vae_best.pt"):
         else:
             vae.load_state_dict(checkpoint)
         
-        print("✓ 成功加载KL-VAE")
         return vae, "kl_vae"
         
     except Exception as e:
@@ -178,7 +172,6 @@ class LatentDataset(Dataset):
         else:
             data_path = os.path.join(latent_dir, "target_fewshot.pt")
         
-        print(f"加载预编码latent: {data_path}")
         
         # 加载数据
         if os.path.exists(data_path):
@@ -203,24 +196,17 @@ class LatentDataset(Dataset):
                 import sys
                 sys.exit(1)
             
-            print(f"加载 {len(self.latents)} 个latent样本")
-            print(f"Latent形状: {self.latents[0].shape}")
+            print(f"加载 {len(self.latents)} 个latent样本, 形状: {self.latents[0].shape}")
+            if self.labels is not None:
+                num_classes = len(torch.unique(self.labels))
+                print(f"条件类别数: {num_classes}个用户")
             
             # 加载数据统计信息（元数据）
             stats_path = os.path.join(latent_dir, "data_stats.pt")
             if os.path.exists(stats_path):
                 self.stats = torch.load(stats_path, map_location='cpu')
-                # 这是元数据，不是mean/std
-                print(f"数据信息:")
-                print(f"  - 源域: {self.stats.get('source_domain', 'N/A')}")
-                print(f"  - 目标域: {self.stats.get('target_domain', 'N/A')}")
-                print(f"  - Latent形状: {self.stats.get('latent_shape', 'N/A')}")
-                print(f"  - Scale factor: {self.stats.get('scale_factor', 0.18215)}")
-                print(f"  - 输入范围: {self.stats.get('input_range', '[0,1]')}")
-                # 注意：latent已经在prepare_microdoppler_data.py中通过encode_images应用了scale_factor
-                # 所以不需要额外的归一化
+                # latent已经在prepare_microdoppler_data.py中通过encode_images应用了scale_factor
             else:
-                print("未找到统计信息文件")
                 self.stats = None
         else:
             print(f"="*60)
@@ -248,9 +234,14 @@ class LatentDataset(Dataset):
             # 不应该出现这种情况，但以防万一
             raise ValueError(f"意外的latent维度: {latent.shape}")
         
+        # 获取标签（用户ID）用于条件扩散
+        label = self.labels[idx] if self.labels is not None else 0
+        
         # latent已经在prepare_microdoppler_data.py中应用了scale_factor (0.18215)
-        # 直接返回，不需要额外处理
-        return {"latents": latent}
+        return {
+            "latents": latent,
+            "labels": torch.tensor(label, dtype=torch.long)
+        }
 
 
 # ============ 5. Latent Diffusion训练 ============
@@ -259,32 +250,27 @@ def train_latent_diffusion(
     latent_dir="/kaggle/input/data-latent2",  # 预编码的latent目录
     output_dir="/kaggle/working/latent_diffusion",
     num_epochs=50,
-    batch_size=128,  # latent空间可以更大batch
-    learning_rate=1e-4,
+    batch_size=64,  # 增大batch size（还有10G显存）
+    learning_rate=2e-4,  # 稍微增大学习率配合大batch
+    weight_decay=0.01,  # 添加权重衰减正则化
 ):
     # 加速器
     accelerator = Accelerator(mixed_precision="fp16")
     
     # 加载VAE（必需，用于生成时解码）
-    print("="*60)
-    print("步骤1：加载VAE模型...")
+    print("加载VAE...")
     vae_model, vae_type = load_pretrained_vae(vae_path)
     vae_model.cuda()
     vae_model.eval()  # VAE保持eval模式
     vae_wrapper = VAEWrapper(vae_model, vae_type)
-    print(f"✓ VAE加载成功 (类型: {vae_type})")
-    
-    # 确认VAE结构
-    if vae_type == "kl_vae":
-        print(f"  - Encoder下采样: 8x (256x256 -> 32x32)")
-        print(f"  - Latent channels: 4")
-        print(f"  - Scale factor: 0.18215 (已内置)")
-    print("="*60)
     
     # 获取latent模型配置
     config = get_latent_model_config()
     
-    # 创建UNet（在latent空间）
+    # 创建条件UNet（支持用户ID作为条件）
+    # Normal_line有31个用户（ID_01到ID_31）
+    num_classes = 31
+    
     unet = UNet2DModel(
         sample_size=32,  # latent大小
         in_channels=4,   # VAE latent channels
@@ -304,13 +290,15 @@ def train_latent_diffusion(
         attention_head_dim=8,
         norm_num_groups=32,
         act_fn="silu",
+        # 添加条件编码
+        class_embed_type="timestep",  # 将类别嵌入添加到时间步嵌入
+        num_class_embeds=num_classes,  # 用户数
     )
     
     total_params = sum(p.numel() for p in unet.parameters()) / 1e6
     print(f"UNet参数: {total_params:.1f}M")
     
     # 数据集（使用预编码的latent）
-    print("步骤2：加载预编码latent数据...")
     dataset = LatentDataset(
         latent_dir=latent_dir,
         split="train"  # 使用训练集
@@ -318,9 +306,7 @@ def train_latent_diffusion(
     
     # 验证数据集
     if len(dataset) == 0:
-        print("="*60)
         print("错误：数据集为空！")
-        print("="*60)
         import sys
         sys.exit(1)
     
@@ -328,10 +314,20 @@ def train_latent_diffusion(
         dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=0  # latent已缓存，不需要多进程
+        num_workers=0,  # latent已缓存，不需要多进程
+        drop_last=True  # 保证batch一致性
     )
-    print(f"✓ 数据集加载成功，共{len(dataset)}个样本")
-    print("="*60)
+    print(f"训练集: {len(dataset)}个样本")
+    
+    # 加载验证集
+    val_dataset = LatentDataset(latent_dir=latent_dir, split="val")
+    val_dataloader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0
+    )
+    print(f"验证集: {len(val_dataset)}个样本")
     
     # 噪声调度器
     noise_scheduler = DDPMScheduler(
@@ -342,12 +338,12 @@ def train_latent_diffusion(
         prediction_type="epsilon",
     )
     
-    # 优化器
+    # 优化器（使用传入的weight_decay参数）
     optimizer = torch.optim.AdamW(
         unet.parameters(),
         lr=learning_rate,
         betas=(0.9, 0.999),
-        weight_decay=0.01,
+        weight_decay=weight_decay,  # 使用传入的参数
     )
     
     # 学习率调度
@@ -362,12 +358,8 @@ def train_latent_diffusion(
         unet, optimizer, dataloader, lr_scheduler
     )
     
-    # 开始训练前的确认
-    print("步骤3：开始训练")
-    print(f"  - 每个epoch {len(dataloader)} 个批次")
-    print(f"  - 总计 {num_epochs * len(dataloader)} 个训练步")
-    print(f"  - 每500步生成一次样本")
-    print("="*60)
+    # 开始训练
+    print(f"训练: {num_epochs}轮, 共{num_epochs * len(dataloader)}步")
     
     # 训练循环
     global_step = 0
@@ -383,8 +375,9 @@ def train_latent_diffusion(
         
         epoch_losses = []
         for batch in dataloader:
-            # 直接获取预编码的latent
+            # 获取latent和标签
             latents = batch["latents"]
+            labels = batch["labels"]  # 用户ID
             
             # 标准diffusion训练
             noise = torch.randn_like(latents)
@@ -395,8 +388,12 @@ def train_latent_diffusion(
             
             noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
             
-            # 预测噪声
-            noise_pred = unet(noisy_latents, timesteps).sample
+            # 条件预测噪声（传入用户ID作为类别条件）
+            noise_pred = unet(
+                noisy_latents, 
+                timesteps,
+                class_labels=labels  # 条件信息
+            ).sample
             loss = F.mse_loss(noise_pred, noise)
             
             # 更新
@@ -427,8 +424,31 @@ def train_latent_diffusion(
         
         # 关闭进度条并输出epoch统计
         progress_bar.close()
-        avg_loss = sum(epoch_losses) / len(epoch_losses)
-        print(f"Epoch {epoch+1}/{num_epochs} 完成 - 平均损失: {avg_loss:.4f}")
+        avg_train_loss = sum(epoch_losses) / len(epoch_losses)
+        
+        # 验证集评估
+        val_losses = []
+        unet.eval()
+        with torch.no_grad():
+            for batch in val_dataloader:
+                latents = batch["latents"]
+                labels = batch["labels"]
+                
+                noise = torch.randn_like(latents)
+                timesteps = torch.randint(
+                    0, noise_scheduler.config.num_train_timesteps,
+                    (latents.shape[0],), device=latents.device
+                ).long()
+                
+                noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+                noise_pred = unet(noisy_latents, timesteps, class_labels=labels).sample
+                val_loss = F.mse_loss(noise_pred, noise)
+                val_losses.append(val_loss.item())
+        
+        avg_val_loss = sum(val_losses) / len(val_losses) if val_losses else 0
+        unet.train()
+        
+        print(f"Epoch {epoch+1}/{num_epochs}: train_loss={avg_train_loss:.4f}, val_loss={avg_val_loss:.4f}")
     
     # 保存模型
     os.makedirs(output_dir, exist_ok=True)
@@ -455,18 +475,24 @@ def train_latent_diffusion(
 
 # ============ 6. 生成样本 ============
 def generate_latent_samples(unet, vae_wrapper, scheduler, epoch, step):
-    """从latent生成样本"""
+    """条件生成样本（选择4个不同用户）"""
     unet.eval()
     
     with torch.no_grad():
         # 初始化随机噪声（真实采样，非模拟数据）
-        latents = torch.randn((4, 4, 32, 32), device=unet.device)
+        batch_size = 4
+        latents = torch.randn((batch_size, 4, 32, 32), device=unet.device)
         
-        # DDIM采样
-        scheduler.set_timesteps(20)  # 使用20步
+        # 选择不同的用户ID进行条件生成
+        # 选择用户 0, 7, 14, 21（分散选择）
+        class_labels = torch.tensor([0, 7, 14, 21], device=unet.device, dtype=torch.long)
+        
+        # DDIM采样（50步）
+        scheduler.set_timesteps(50)  
         
         for t in scheduler.timesteps:
-            noise_pred = unet(latents, t).sample
+            # 条件生成
+            noise_pred = unet(latents, t, class_labels=class_labels).sample
             latents = scheduler.step(noise_pred, t, latents).prev_sample
         
         # 解码到图像空间
@@ -484,7 +510,6 @@ def generate_latent_samples(unet, vae_wrapper, scheduler, epoch, step):
     plt.suptitle(f'Step {step} (Epoch {epoch+1})')
     plt.savefig(f'/kaggle/working/samples_step_{step}.png', dpi=100, bbox_inches='tight')
     plt.close()
-    print(f"  生成样本已保存: samples_step_{step}.png")
 
 
 # ============ 7. 推理pipeline ============
@@ -497,7 +522,7 @@ class LatentDiffusionPipeline:
         self.scheduler = scheduler
     
     @torch.no_grad()
-    def __call__(self, batch_size=4, num_inference_steps=50, ddim=True):
+    def __call__(self, batch_size=4, num_inference_steps=50, ddim=True, class_labels=None):
         # 使用DDIM加速
         if ddim:
             self.scheduler = DDIMScheduler.from_config(self.scheduler.config)
@@ -510,9 +535,16 @@ class LatentDiffusionPipeline:
             device=self.unet.device
         )
         
-        # 去噪循环
+        # 设置条件标签（如果没有指定，随机选择用户）
+        if class_labels is None:
+            # 随机选择不同用户
+            class_labels = torch.randint(0, 31, (batch_size,), device=self.unet.device)
+        elif not isinstance(class_labels, torch.Tensor):
+            class_labels = torch.tensor(class_labels, device=self.unet.device, dtype=torch.long)
+        
+        # 条件去噪循环
         for t in tqdm(self.scheduler.timesteps, desc="生成中"):
-            noise_pred = self.unet(latents, t).sample
+            noise_pred = self.unet(latents, t, class_labels=class_labels).sample
             latents = self.scheduler.step(noise_pred, t, latents).prev_sample
         
         # 解码
@@ -530,28 +562,20 @@ class LatentDiffusionPipeline:
 # ============ 8. 主函数 ============
 if __name__ == "__main__":
     # 训练
-    print("="*60)
-    print("Latent Diffusion训练")
-    print("="*60)
-    print("配置信息:")
-    print(f"  - VAE路径: /kaggle/input/kl-vae-best-pt/kl_vae_best.pt")
-    print(f"  - Latent数据: /kaggle/input/data-latent2")
-    print(f"  - 训练轮数: 30")
-    print(f"  - 批次大小: 32")
-    print(f"  - 学习率: 1e-4")
-    print("="*60)
+    print("开始Latent Diffusion训练...")
     
     unet, vae_wrapper = train_latent_diffusion(
         vae_path="/kaggle/input/kl-vae-best-pt/kl_vae_best.pt",  # 必需！用于解码
         latent_dir="/kaggle/input/data-latent2",  # 预编码的latent
         output_dir="/kaggle/working/latent_diffusion",
-        num_epochs=30,
-        batch_size=32,  # latent空间可以更大batch
-        learning_rate=1e-4,
+        num_epochs=50,  # 训练更多轮次
+        batch_size=64,  # 增大batch size（有10G空余显存）
+        learning_rate=2e-4,  # 稍微提高学习率配合大batch
+        weight_decay=0.01,  # L2正则化
     )
     
     # 测试生成
-    print("\n测试生成...")
+    print("生成测试样本...")
     scheduler = DDIMScheduler(
         num_train_timesteps=1000,
         beta_start=0.00085,
@@ -559,15 +583,23 @@ if __name__ == "__main__":
     )
     
     pipeline = LatentDiffusionPipeline(unet, vae_wrapper, scheduler)
-    images = pipeline(batch_size=8, num_inference_steps=20)  # DDIM 20步
     
-    # 显示结果
+    # 生成8个样本，选择8个不同的用户
+    selected_users = [0, 4, 8, 12, 16, 20, 24, 28]  # 均匀分布的用户ID
+    images = pipeline(
+        batch_size=8, 
+        num_inference_steps=50,  # DDIM 50步
+        class_labels=selected_users  # 指定用户
+    )
+    
+    # 保存结果
     fig, axes = plt.subplots(2, 4, figsize=(12, 6))
     for i, (ax, img) in enumerate(zip(axes.flat, images)):
         ax.imshow(img)
         ax.axis('off')
-    plt.suptitle('Latent Diffusion最终结果（20步DDIM）')
+        ax.set_title(f'User {selected_users[i]}')
+    plt.suptitle('Conditional Generation (50-step DDIM)')
     plt.savefig('/kaggle/working/final_results.png')
-    print("✓ 结果已保存到 /kaggle/working/final_results.png")
+    plt.close()
     
-    print("\n训练完成！")
+    print("完成！结果保存在 /kaggle/working/")
